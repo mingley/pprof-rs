@@ -1,6 +1,6 @@
 [package]
 name = "rpprof"
-version = "0.17.0"
+version = "0.18.0"
 authors = ["Yang Keao <keao.yang@yahoo.com>", "Michael Ingley <michael.ingley@gmail.com>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ keywords = ["profiler", "pprof", "cpu-profiler", "flamegraph", "perf"]
 categories = ["development-tools::profiling"]
 
 [features]
-default = ["cpp"]
+default = ["cpp", "framehop-unwinder", "flamegraph", "prost-codec"]
 cpp = ["symbolic-demangle/cpp"]
 flamegraph = ["inferno"]
 frame-pointer = []

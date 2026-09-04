@@ -101,3 +101,56 @@ pub mod protos {
 
 #[cfg(feature = "criterion")]
 pub mod criterion;
+
+pub mod alloc;
+
+/// Collects a CPU profile at 99Hz for the specified duration and returns the resulting report.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::time::Duration;
+///
+/// let report = rpprof::profile(Duration::from_secs(5)).unwrap();
+/// let mut file = std::fs::File::create("profile.folded").unwrap();
+/// report.write_folded(&mut file).unwrap();
+/// ```
+pub fn profile(duration: std::time::Duration) -> Result<Report> {
+    profile_with_frequency(99, duration)
+}
+
+/// Collects a CPU profile with a custom frequency in Hz for the specified duration.
+pub fn profile_with_frequency(frequency: i32, duration: std::time::Duration) -> Result<Report> {
+    let guard = ProfilerGuardBuilder::default()
+        .frequency(frequency)
+        .build()?;
+    std::thread::sleep(duration);
+    guard.report().build()
+}
+
+/// Collects a real Wall-clock profile at 99Hz for the specified duration.
+///
+/// Useful for identifying time spent blocked on I/O, database queries, mutexes, or network calls.
+pub fn profile_wall(duration: std::time::Duration) -> Result<Report> {
+    let guard = ProfilerGuardBuilder::default()
+        .frequency(99)
+        .clock_type(ClockType::Wall)
+        .build()?;
+    std::thread::sleep(duration);
+    guard.report().build()
+}
+
+#[cfg(test)]
+mod top_level_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_top_level_profile_helpers() {
+        let report = profile(Duration::from_millis(50)).unwrap();
+        assert_eq!(report.clock_type(), ClockType::Cpu);
+
+        let wall_report = profile_wall(Duration::from_millis(50)).unwrap();
+        assert_eq!(wall_report.clock_type(), ClockType::Wall);
+    }
+}

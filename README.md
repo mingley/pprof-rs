@@ -12,7 +12,11 @@
 
 - **Dependency and Security Updates**: Refreshed dependency trees to resolve security advisories flagged by `cargo-deny` (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
 - **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
+- **Zero-Configuration Unwinding**: `framehop-unwinder` is enabled by default. Uses pre-parsed DWARF unwind tables for fast, allocation-free, async-signal-safe stack unwinding—**no `-Cforce-frame-pointers=yes` or special release build flags required**.
+- **Sampled Heap / Memory Profiling**: Built-in `rpprof::alloc::AllocProfiler` (`GlobalAlloc` wrapper) with Poisson-sampled allocation tracking (512 KiB default rate), capturing both live in-use memory and cumulative allocation flamegraphs with <1% overhead.
+- **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
 - **Direct Folded Stack & Speedscope Export**: Native `report.write_folded(&mut writer)` and `report.write_speedscope(&mut writer, name)` methods for direct compatibility with [Speedscope](https://www.speedscope.app/) and Brendan Gregg scripts.
+- **One-Liner Profiling Helpers**: `rpprof::profile(duration)` and `rpprof::profile_wall(duration)` for effortless profiling in integration tests, CLI tools, and HTTP endpoints.
 - **Allocation-Free Iterator**: Optimized internal hash collector iteration to eliminate 4,095 heap allocations (`Box<dyn Iterator>`) and recursion on every report build.
 - **Thread Name Capture & Filtering**: Fixed macOS and musl thread name detection, and added `thread_blocklist` for async-signal-safe thread filtering by name.
 - **Missed Sample Observability**: Built-in atomic counter (`guard.missed_samples()` / `Profiler::missed_samples()`) tracking sampling ticks dropped due to lock contention in the signal handler. Missed sample counts are also embedded in generated pprof protobuf profiles.
@@ -24,14 +28,64 @@
 
 ## Usage
 
-Add `rpprof` to your `Cargo.toml`:
+Add `rpprof` to your `Cargo.toml` (all unwinding, flamegraph, and protobuf features work out-of-the-box):
 
 ```toml
 [dependencies]
-rpprof = { version = "0.17", features = ["flamegraph", "prost-codec"] }
+rpprof = "0.18"
 ```
 
-### Basic Profiling
+### Quick One-Liner CPU Profiling
+
+```rust
+use std::fs::File;
+use std::time::Duration;
+
+fn main() {
+    // Profile CPU for 10 seconds
+    let report = rpprof::profile(Duration::from_secs(10)).unwrap();
+
+    // Export flamegraph SVG
+    let file = File::create("flamegraph.svg").unwrap();
+    report.flamegraph(file).unwrap();
+}
+```
+
+### Sampled Heap / Memory Profiling
+
+Wrap your global allocator with `AllocProfiler` to enable low-overhead, Poisson-sampled heap profiling:
+
+```rust
+use std::fs::File;
+
+#[global_allocator]
+static ALLOC: rpprof::alloc::AllocProfiler = rpprof::alloc::AllocProfiler::system();
+
+fn main() {
+    // Start tracking memory allocations
+    rpprof::alloc::start();
+
+    // Your workload here...
+    do_heavy_allocations();
+
+    // Snapshot heap profile
+    let heap = rpprof::alloc::heap_report().unwrap();
+
+    // Visualize live in-use memory
+    let inuse_report = heap.to_inuse_report();
+    let mut flame_file = File::create("heap_inuse.svg").unwrap();
+    inuse_report.flamegraph(&mut flame_file).unwrap();
+
+    // Export cumulative allocations to Speedscope
+    let alloc_report = heap.to_alloc_report();
+    let mut speedscope_file = File::create("heap_alloc.speedscope.json").unwrap();
+    alloc_report.write_speedscope(&mut speedscope_file, "heap").unwrap();
+
+    rpprof::alloc::stop();
+}
+```
+
+### Basic CPU Profiler Guard
 
 ```rust
 use std::fs::File;

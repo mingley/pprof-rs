@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-04
+
+### Added
+- Added `framehop-unwinder` to default crate features, enabling fast, allocation-free, async-signal-safe DWARF unwinding without needing `-Cforce-frame-pointers=yes` or special release build flags.
+- Added `flamegraph` and `prost-codec` to default crate features so flamegraphs and Google `profile.proto` protobufs work out of the box with zero extra feature configuration.
+- Added `rpprof::alloc::AllocProfiler` (`GlobalAlloc` wrapper) for low-overhead, Poisson-sampled heap and memory allocation profiling.
+- Added `HeapReport` with support for `to_inuse_report()`, `to_alloc_report()`, and standard Google pprof heap profiles (`alloc_objects`, `alloc_space`, `inuse_objects`, `inuse_space`).
+- Added top-level convenience functions: `rpprof::profile(duration)`, `rpprof::profile_with_frequency(frequency, duration)`, and `rpprof::profile_wall(duration)`.
+
 ## [0.17.0] - 2026-09-04
 
 ### Added
