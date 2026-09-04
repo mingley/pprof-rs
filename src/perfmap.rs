@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::BufRead,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
 };
 
 use arc_swap::ArcSwap;

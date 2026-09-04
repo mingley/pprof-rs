@@ -20,14 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed all security advisories and unmaintained crate warnings flagged by `cargo-deny`.
 
 ### Changed
+- Migrated to Rust 2024 edition.
+- Increased MSRV to 1.86.0.
 - Dual-licensed as MIT OR Apache-2.0.
 - Upgraded `inferno` to 0.12 (fixes `quick-xml` CVEs).
 - Upgraded `prost` and `prost-build` to range `>=0.12, <0.15` (fixes `bytes` and `anyhow` vulnerabilities).
 - Upgraded `symbolic-demangle` to range `>=12.18, <14` and `memmap2` to `>=0.9.11, <0.10` (fixes `memmap2` RUSTSEC-2026-0186).
 - Upgraded `backtrace` to `>=0.3.73` (fixes `adler` RUSTSEC-2025-0056).
-- Upgraded `nix` to range `>=0.27, <0.31`.
+- Upgraded `nix` to range `>=0.27, <0.32` (nix 0.31).
+- Upgraded `framehop` to range `>=0.13, <0.17` (framehop 0.16).
+- Upgraded `spin` to range `>=0.10, <0.13` (spin 0.12).
+- Upgraded `tempfile` to 3.18, `smallvec` to 1.14, and `once_cell` to 1.21.
 - Upgraded `criterion` to support `0.8` (fixes `crossbeam-epoch` vulnerability).
-- Increased MSRV to 1.80.0.
 
 ## [0.15.0] - 2024-03-22
 

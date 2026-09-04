@@ -11,9 +11,8 @@ pub struct Frame {
     pub ip: usize,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn _Unwind_FindEnclosingFunction(pc: *mut c_void) -> *mut c_void;
-
 }
 
 impl super::Frame for Frame {
@@ -45,9 +44,9 @@ impl super::Frame for Frame {
 #[allow(dead_code)]
 unsafe fn read_ptr<T>(ptr: *const T) -> T {
     if ptr.align_offset(std::mem::align_of::<T>()) == 0 {
-        std::ptr::read(ptr)
+        unsafe { std::ptr::read(ptr) }
     } else {
-        std::ptr::read_unaligned(ptr)
+        unsafe { std::ptr::read_unaligned(ptr) }
     }
 }
 

@@ -46,7 +46,9 @@ impl<'a, 'b> PProfProfiler<'a, 'b> {
 }
 
 #[cfg(not(any(feature = "_protobuf", feature = "flamegraph")))]
-compile_error!("Either feature \"protobuf\" or \"flamegraph\" must be enabled when \"criterion\" feature is enabled.");
+compile_error!(
+    "Either feature \"protobuf\" or \"flamegraph\" must be enabled when \"criterion\" feature is enabled."
+);
 
 impl<'a, 'b> Profiler for PProfProfiler<'a, 'b> {
     fn start_profiling(&mut self, _benchmark_id: &str, _benchmark_dir: &Path) {

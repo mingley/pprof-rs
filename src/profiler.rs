@@ -314,7 +314,7 @@ impl Drop for ErrnoProtector {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg_attr(
     not(all(any(
         target_arch = "x86_64",
@@ -526,7 +526,7 @@ impl Profiler {
 
     fn unregister_signal_handler(&mut self) -> Result<()> {
         if let Some(old_action) = self.old_sigaction.take() {
-            if old_action.handler() == signal::SigHandler::SigDfl {
+            if matches!(old_action.handler(), signal::SigHandler::SigDfl) {
                 let ignore = signal::SigAction::new(
                     signal::SigHandler::SigIgn,
                     signal::SaFlags::empty(),

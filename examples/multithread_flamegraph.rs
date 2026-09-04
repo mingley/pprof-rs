@@ -52,12 +52,14 @@ fn main() {
     let p1 = prime_numbers.clone();
     std::thread::Builder::new()
         .name("THREAD_ONE".to_owned())
-        .spawn(move || loop {
-            let mut _v = 0;
+        .spawn(move || {
+            loop {
+                let mut _v = 0;
 
-            for i in 2..50000 {
-                if is_prime_number(i, p1.clone()) {
-                    _v += 1;
+                for i in 2..50000 {
+                    if is_prime_number(i, p1.clone()) {
+                        _v += 1;
+                    }
                 }
             }
         })
@@ -66,24 +68,28 @@ fn main() {
     let p2 = prime_numbers.clone();
     std::thread::Builder::new()
         .name("THREAD_TWO".to_owned())
-        .spawn(move || loop {
-            let mut _v = 0;
+        .spawn(move || {
+            loop {
+                let mut _v = 0;
 
-            for i in 2..50000 {
-                if is_prime_number(i, p2.clone()) {
-                    _v += 1;
+                for i in 2..50000 {
+                    if is_prime_number(i, p2.clone()) {
+                        _v += 1;
+                    }
                 }
             }
         })
         .unwrap();
 
     let p3 = prime_numbers;
-    std::thread::spawn(move || loop {
-        let mut _v = 0;
+    std::thread::spawn(move || {
+        loop {
+            let mut _v = 0;
 
-        for i in 2..50000 {
-            if is_prime_number(i, p3.clone()) {
-                _v += 1;
+            for i in 2..50000 {
+                if is_prime_number(i, p3.clone()) {
+                    _v += 1;
+                }
             }
         }
     });
