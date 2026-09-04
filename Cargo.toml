@@ -1,7 +1,7 @@
 [package]
 name = "rpprof"
-version = "0.16.0"
-authors = ["Yang Keao <keao.yang@yahoo.com>", "Michael Ingley <46031485+mingley@users.noreply.github.com>"]
+version = "0.16.1"
+authors = ["Yang Keao <keao.yang@yahoo.com>", "Michael Ingley <michael.ingley@gmail.com>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "An updated, maintained CPU and memory profiling tool for Rust programs."

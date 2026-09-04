@@ -1,23 +1,22 @@
 # rpprof
 
-`rpprof` is a modern, actively maintained CPU and memory profiler for Rust programs. It is a fork of [`tikv/pprof-rs`](https://github.com/tikv/pprof-rs) created to provide timely updates, bug fixes, and active maintenance because the upstream repository is largely inactive/unresponsive and needs some love.
+`rpprof` is a CPU and memory profiler for Rust programs. It is a fork of [`tikv/pprof-rs`](https://github.com/tikv/pprof-rs), created to apply needed dependency updates and bug fixes after upstream development remained stale for nearly a year.
 
-`rpprof` brings dependency trees up to date with zero `cargo-deny` security advisories, fixes long-standing signal handling and unwinding bugs, and adds first-class observability for dropped samples.
+`rpprof` refreshes dependency trees to address known advisories, fixes signal handling and unwinding edge cases, and adds observability for dropped samples.
 
 [![Crates.io](https://img.shields.io/crates/v/rpprof.svg)](https://crates.io/crates/rpprof)
 [![Documentation](https://docs.rs/rpprof/badge.svg)](https://docs.rs/rpprof)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-## Key Improvements over legacy `pprof-rs`
+## Key Changes and Improvements
 
-- **Zero Cargo-Deny Vulnerabilities**: Fully updated dependency tree addressing known advisories (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
-- **Missed Sample Observability**: Built-in atomic counter (`guard.missed_samples()` / `Profiler::missed_samples()`) tracking sampling ticks dropped due to lock contention in the signal handler. Missed samples are also automatically embedded as comments in generated pprof protobuf profiles.
-- **Stray SIGPROF Protection**: Fixed signal handler unregistration so trailing SIGPROF signals from kernel timers do not terminate the process with `SIGPROF` / `Profiling timer expired`.
-- **macOS Unaligned Context Safety**: Safe unaligned reads of `ucontext_t` fields in signal handlers preventing `SIGABRT` crashes on macOS debug builds.
-- **Async-Signal-Safe Address Validation**: Refactored `addr_validate` to use direct `libc` system calls without creating invalid Rust slice references or depending on `nix`'s file descriptor API.
-- **Modern Ecosystem**: Broad, unified dependency ranges (`nix >= 0.27, < 0.31`, `prost >= 0.12, < 0.15`, `object >= 0.32, < 0.38`, `inferno 0.12`, `criterion 0.8`).
+- **Dependency and Security Updates**: Refreshed dependency trees to resolve security advisories flagged by `cargo-deny` (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
+- **Missed Sample Observability**: Built-in atomic counter (`guard.missed_samples()` / `Profiler::missed_samples()`) tracking sampling ticks dropped due to lock contention in the signal handler. Missed sample counts are also embedded in generated pprof protobuf profiles.
+- **Stray SIGPROF Protection**: Sets `SIG_IGN` when unregistering the signal handler if the previous disposition was default, preventing trailing timer signals from aborting the process.
+- **macOS Context Alignment**: Safe unaligned reads of `ucontext_t` fields in signal handlers to prevent debug assertions on macOS.
+- **Async-Signal-Safe Address Validation**: Uses direct `libc` system calls in `addr_validate` without creating temporary slice references or relying on higher-level file descriptor abstractions.
+- **Modern Ecosystem Support**: Compatible with Rust 2024 Edition, with updated dependency ranges across `nix`, `prost`, `object`, `inferno`, and `criterion`.
 - **Dual Licensed**: MIT OR Apache-2.0.
-- **Automated CI/CD**: Multi-platform GitHub Actions testing, clippy, formatting, cargo-deny enforcement, and one-click releases to crates.io.
 
 ## Usage
 
