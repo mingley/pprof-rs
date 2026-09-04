@@ -46,7 +46,7 @@ fn main() {
     let prime_numbers = Arc::new(prepare_prime_numbers());
 
     //    println!("{}", std::mem::size_of::<Collector<UnresolvedFrames>>());
-    let guard = pprof::ProfilerGuard::new(100).unwrap();
+    let guard = rpprof::ProfilerGuard::new(100).unwrap();
 
     let p1 = prime_numbers.clone();
     std::thread::Builder::new()

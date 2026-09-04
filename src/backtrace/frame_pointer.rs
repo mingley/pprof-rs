@@ -42,6 +42,7 @@ impl super::Frame for Frame {
 ///
 /// Same as [`std::ptr::read_unaligned`]
 #[inline]
+#[allow(dead_code)]
 unsafe fn read_ptr<T>(ptr: *const T) -> T {
     if ptr.align_offset(std::mem::align_of::<T>()) == 0 {
         std::ptr::read(ptr)
@@ -50,6 +51,7 @@ unsafe fn read_ptr<T>(ptr: *const T) -> T {
     }
 }
 
+#[allow(dead_code)]
 pub struct Trace {}
 impl super::Trace for Trace {
     type Frame = Frame;
@@ -66,11 +68,11 @@ impl super::Trace for Trace {
 
         #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
         let frame_pointer = unsafe {
-            let mcontext = (*ucontext).uc_mcontext;
+            let mcontext = std::ptr::addr_of!((*ucontext).uc_mcontext).read_unaligned();
             if mcontext.is_null() {
                 0
             } else {
-                (*mcontext).__ss.__rbp as usize
+                std::ptr::addr_of!((*mcontext).__ss.__rbp).read_unaligned() as usize
             }
         };
 
@@ -79,11 +81,11 @@ impl super::Trace for Trace {
 
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         let frame_pointer = unsafe {
-            let mcontext = (*ucontext).uc_mcontext;
+            let mcontext = std::ptr::addr_of!((*ucontext).uc_mcontext).read_unaligned();
             if mcontext.is_null() {
                 0
             } else {
-                (*mcontext).__ss.__fp as usize
+                std::ptr::addr_of!((*mcontext).__ss.__fp).read_unaligned() as usize
             }
         };
 
@@ -130,6 +132,7 @@ impl super::Trace for Trace {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 struct FramePointerLayout {
     frame_pointer: *mut FramePointerLayout,
     ret: usize,

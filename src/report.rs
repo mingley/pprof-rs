@@ -18,6 +18,9 @@ pub struct Report {
 
     /// Collection frequency, start time, duration.
     pub timing: ReportTiming,
+
+    /// Number of samples dropped due to lock contention in the signal handler.
+    pub missed_samples: u64,
 }
 
 /// The presentation of an unsymbolicated report which is actually an `HashMap` from `UnresolvedFrames` to isize (count).
@@ -27,6 +30,9 @@ pub struct UnresolvedReport {
 
     /// Collection frequency, start time, duration.
     pub timing: ReportTiming,
+
+    /// Number of samples dropped due to lock contention in the signal handler.
+    pub missed_samples: u64,
 }
 
 type FramesPostProcessor = Box<dyn Fn(&mut Frames)>;
@@ -92,6 +98,8 @@ impl<'a> ReportBuilder<'a> {
                 Ok(UnresolvedReport {
                     data: hash_map,
                     timing: self.timing.clone(),
+                    missed_samples: crate::profiler::MISSED_SAMPLES
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 })
             }
         }
@@ -134,6 +142,8 @@ impl<'a> ReportBuilder<'a> {
                 Ok(Report {
                     data: hash_map,
                     timing: self.timing.clone(),
+                    missed_samples: crate::profiler::MISSED_SAMPLES
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 })
             }
         }
@@ -244,6 +254,13 @@ mod protobuf {
             dedup_str.insert(CPU.into());
             dedup_str.insert(NANOSECONDS.into());
             dedup_str.insert(THREAD.into());
+
+            let missed_comment = format!(
+                "missed samples due to lock contention: {}",
+                self.missed_samples
+            );
+            dedup_str.insert(missed_comment.clone());
+
             // string table's first element must be an empty string
             let mut str_tbl = vec!["".to_owned()];
             str_tbl.extend(dedup_str.into_iter());
@@ -321,6 +338,7 @@ mod protobuf {
                 unit: *strings.get(NANOSECONDS).unwrap() as i64,
                 ..Default::default()
             };
+            let missed_comment_idx = *strings.get(missed_comment.as_str()).unwrap() as i64;
             let profile = protos::Profile {
                 sample_type: vec![samples_value, time_value.clone()].into(),
                 sample: samples.into(),
@@ -336,6 +354,7 @@ mod protobuf {
                 duration_nanos: self.timing.duration.as_nanos() as i64,
                 period_type: Some(time_value).into(),
                 period: 1_000_000_000 / self.timing.frequency as i64,
+                comment: vec![missed_comment_idx].into(),
                 ..protos::Profile::default()
             };
             Ok(profile)

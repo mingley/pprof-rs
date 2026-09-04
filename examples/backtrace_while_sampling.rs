@@ -11,7 +11,7 @@ fn deep_recursive(depth: i32) {
 }
 
 fn main() {
-    let guard = pprof::ProfilerGuardBuilder::default()
+    let guard = rpprof::ProfilerGuardBuilder::default()
         .frequency(1000)
         .blocklist(&["libc", "libgcc", "pthread"])
         .build()
@@ -25,6 +25,6 @@ fn main() {
         let file = File::create("flamegraph.svg").unwrap();
         report.flamegraph(file).unwrap();
 
-        println!("report: {:?}", &report);
+        println!("report: {:?}", report);
     };
 }

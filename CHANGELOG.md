@@ -4,7 +4,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.0] - 202
+## [0.16.0] - 2026-09-04
+
+### Added
+- Forked and renamed crate to `rpprof` with active maintenance.
+- Added `MISSED_SAMPLES` atomic counter (`guard.missed_samples()` / `Profiler::missed_samples()`) to track and report samples dropped due to lock contention in the signal handler.
+- Embedded missed sample counts as comments in pprof protobuf profile outputs.
+- Added GitHub Actions workflow for automatic crates.io releases on tags or manual dispatch.
+
+### Fixed
+- Fixed stray SIGPROF signal handling in `unregister_signal_handler`: install `SIG_IGN` when previous handler was `SIG_DFL`, preventing process termination from late ticks after timer disarm.
+- Fixed unaligned `ucontext_t` pointer dereferences in signal handler and unwinders on macOS (`SIGABRT` in debug builds).
+- Fixed `addr_validate` to use `libc` directly without creating invalid Rust slice references or depending on `nix`'s file descriptor API.
+- Fixed `TraceImpl` conflict when multiple unwinder features are active.
+- Fixed all security advisories and unmaintained crate warnings flagged by `cargo-deny`.
+
+### Changed
+- Dual-licensed as MIT OR Apache-2.0.
+- Upgraded `inferno` to 0.12 (fixes `quick-xml` CVEs).
+- Upgraded `prost` and `prost-build` to range `>=0.12, <0.15` (fixes `bytes` and `anyhow` vulnerabilities).
+- Upgraded `symbolic-demangle` to range `>=12.18, <14` and `memmap2` to `>=0.9.11, <0.10` (fixes `memmap2` RUSTSEC-2026-0186).
+- Upgraded `backtrace` to `>=0.3.73` (fixes `adler` RUSTSEC-2025-0056).
+- Upgraded `nix` to range `>=0.27, <0.31`.
+- Upgraded `criterion` to support `0.8` (fixes `crossbeam-epoch` vulnerability).
+- Increased MSRV to 1.80.0.
+
+## [0.15.0] - 2024-03-22
 
 ### Added
 - Add support for framehop as unwinder (#267)

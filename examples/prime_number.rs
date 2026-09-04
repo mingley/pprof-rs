@@ -43,7 +43,7 @@ fn prepare_prime_numbers() -> Vec<usize> {
 fn main() {
     let prime_numbers = prepare_prime_numbers();
 
-    let guard = pprof::ProfilerGuard::new(100).unwrap();
+    let guard = rpprof::ProfilerGuard::new(100).unwrap();
 
     loop {
         let mut v = 0;

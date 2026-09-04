@@ -1,30 +1,34 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! pprof-rs is an integrated profiler for rust program.
+//! rpprof is an integrated profiler for Rust programs.
 //!
-//! This crate provides a programable interface to start/stop/report a profiler
+//! This crate provides a programmable interface to start/stop/report a profiler
 //! dynamically. With the help of this crate, you can easily integrate a
-//! profiler into your rust program in a modern, convenient way.
+//! profiler into your Rust program in a modern, convenient way.
 //!
 //! A sample usage is:
 //!
 //! ```rust
-//! let guard = pprof::ProfilerGuard::new(100).unwrap();
+//! let guard = rpprof::ProfilerGuard::new(100).unwrap();
 //! ```
 //!
 //! Then you can read report from the guard:
 //!
 //! ```rust
-//! # let guard = pprof::ProfilerGuard::new(100).unwrap();
-//!if let Ok(report) = guard.report().build() {
-//!    println!("report: {:?}", &report);
-//!};
+//! # let guard = rpprof::ProfilerGuard::new(100).unwrap();
+//! if let Ok(report) = guard.report().build() {
+//!     println!("report: {:?}", &report);
+//! };
 //! ```
 //!
 //! More configuration can be passed through `ProfilerGuardBuilder`:
 //!
 //! ```rust
-//! let guard = pprof::ProfilerGuardBuilder::default().frequency(1000).blocklist(&["libc", "libgcc", "pthread", "vdso"]).build().unwrap();
+//! let guard = rpprof::ProfilerGuardBuilder::default()
+//!     .frequency(1000)
+//!     .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+//!     .build()
+//!     .unwrap();
 //! ```
 //!
 //! The frequency means the sampler frequency, and the `blocklist` means the
@@ -37,7 +41,7 @@
 //! so it's also suggested to skip it.
 //!
 //! You can find more details in
-//! [README.md](https://github.com/tikv/pprof-rs/blob/master/README.md)
+//! [README.md](https://github.com/mingley/pprof-rs/blob/master/README.md)
 
 /// Define the MAX supported stack depth. TODO: make this variable mutable.
 #[cfg(feature = "large-depth")]

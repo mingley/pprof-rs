@@ -1,7 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use pprof::validate;
+use rpprof::validate;
 
 fn bench_validate_addr(c: &mut Criterion) {
     c.bench_function("validate stack addr", |b| {

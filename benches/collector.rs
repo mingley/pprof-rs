@@ -1,7 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use pprof::{Collector, HashCounter};
+use rpprof::{Collector, HashCounter};
 
 fn bench_write_to_collector(c: &mut Criterion) {
     c.bench_function("write_to_collector", |b| {

@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use pprof::protos::Message;
+use rpprof::protos::Message;
 use std::fs::File;
 use std::io::Write;
 
@@ -79,7 +79,7 @@ fn prepare_prime_numbers() -> Vec<usize> {
 fn main() {
     let prime_numbers = prepare_prime_numbers();
 
-    let guard = pprof::ProfilerGuard::new(100).unwrap();
+    let guard = rpprof::ProfilerGuard::new(100).unwrap();
 
     let mut v = 0;
 
@@ -104,7 +104,10 @@ fn main() {
         let profile = report.pprof().unwrap();
 
         let mut content = Vec::new();
+        #[cfg(not(feature = "protobuf-codec"))]
         profile.encode(&mut content).unwrap();
+        #[cfg(feature = "protobuf-codec")]
+        profile.write_to_vec(&mut content).unwrap();
         file.write_all(&content).unwrap();
 
         println!("report: {:?}", report);

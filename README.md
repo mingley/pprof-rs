@@ -1,83 +1,107 @@
-# pprof
+# rpprof
 
-`pprof` is a cpu profiler that can be easily integrated into a rust program.
+`rpprof` is a modern, actively maintained CPU and memory profiler for Rust programs. It is an updated continuation of `pprof-rs` with zero cargo-deny security advisories, bug fixes for signal delivery and unwinding, and observability for dropped samples.
 
-[![Actions Status](https://github.com/tikv/pprof-rs/workflows/build/badge.svg)](https://github.com/tikv/pprof-rs/actions)
-[![Crates.io](https://img.shields.io/crates/v/pprof.svg)](https://crates.io/crates/pprof)
-[![Dependency Status](https://deps.rs/repo/github/tikv/pprof-rs/status.svg)](https://deps.rs/repo/github/tikv/pprof-rs)
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Ftikv%2Fpprof-rs.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Ftikv%2Fpprof-rs?ref=badge_shield)
+[![Crates.io](https://img.shields.io/crates/v/rpprof.svg)](https://crates.io/crates/rpprof)
+[![Documentation](https://docs.rs/rpprof/badge.svg)](https://docs.rs/rpprof)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+## Key Improvements over legacy `pprof-rs`
+
+- **Zero Cargo-Deny Vulnerabilities**: Fully updated dependency tree addressing known advisories (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
+- **Missed Sample Observability**: Built-in atomic counter (`guard.missed_samples()`) that counts sampling intervals dropped due to lock contention in the signal handler. Missed samples are also automatically embedded as comments in generated pprof protobuf profiles.
+- **Stray SIGPROF Protection**: Fixed signal handler unregistration so trailing SIGPROF signals from kernel timers do not terminate the process with `SIGPROF` / `Profiling timer expired`.
+- **macOS Unaligned Context Safety**: Safe unaligned reads of `ucontext_t` fields in signal handlers preventing `SIGABRT` crashes on macOS debug builds.
+- **Modern Ecosystem**: Broad, unified dependency ranges (`nix`, `prost`, `object`, `inferno`, `criterion 0.8`).
+- **Dual Licensed**: MIT OR Apache-2.0.
 
 ## Usage
 
-First, get a guard to start profiling. Profiling will continue until this guard was dropped.
+Add `rpprof` to your `Cargo.toml`:
 
-```rust
-let guard = pprof::ProfilerGuardBuilder::default().frequency(1000).blocklist(&["libc", "libgcc", "pthread", "vdso"]).build().unwrap();
+```toml
+[dependencies]
+rpprof = { version = "0.16", features = ["flamegraph", "prost-codec"] }
 ```
 
-During the profiling time, you can get a report with the guard.
+First, get a guard to start profiling. Profiling will continue until this guard is dropped.
+
+```rust
+let guard = rpprof::ProfilerGuardBuilder::default()
+    .frequency(100)
+    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+    .build()
+    .unwrap();
+```
+
+During or after profiling, obtain a report from the guard:
 
 ```rust
 if let Ok(report) = guard.report().build() {
-    println!("report: {:?}", &report);
-};
+    println!("Report: {:?}", &report);
+    println!("Missed samples: {}", guard.missed_samples());
+}
 ```
-
-`Debug` was implemented for `Report`. It will print a human-readable stack counter report. Here is an example:
-
-```
-FRAME: backtrace::backtrace::trace::h3e91a3123a3049a5 -> FRAME: pprof::profiler::perf_signal_handler::h7b995c4ab2e66493 -> FRAME: Unknown -> FRAME: prime_number::is_prime_number::h70653a2633b88023 -> FRAME: prime_number::main::h47f1058543990c8b -> FRAME: std::rt::lang_start::{{closure}}::h4262e250f8024b06 -> FRAME: std::rt::lang_start_internal::{{closure}}::h812f70926ebbddd0 -> std::panicking::try::do_call::h3210e2ce6a68897b -> FRAME: __rust_maybe_catch_panic -> FRAME: std::panicking::try::h28c2e2ec1c3871ce -> std::panic::catch_unwind::h05e542185e35aabf -> std::rt::lang_start_internal::hd7efcfd33686f472 -> FRAME: main -> FRAME: __libc_start_main -> FRAME: _start -> FRAME: Unknown -> THREAD: prime_number 1217
-FRAME: backtrace::backtrace::trace::h3e91a3123a3049a5 -> FRAME: pprof::profiler::perf_signal_handler::h7b995c4ab2e66493 -> FRAME: Unknown -> FRAME: alloc::alloc::box_free::h82cea48ed688e081 -> FRAME: prime_number::main::h47f1058543990c8b -> FRAME: std::rt::lang_start::{{closure}}::h4262e250f8024b06 -> FRAME: std::rt::lang_start_internal::{{closure}}::h812f70926ebbddd0 -> std::panicking::try::do_call::h3210e2ce6a68897b -> FRAME: __rust_maybe_catch_panic -> FRAME: std::panicking::try::h28c2e2ec1c3871ce -> std::panic::catch_unwind::h05e542185e35aabf -> std::rt::lang_start_internal::hd7efcfd33686f472 -> FRAME: main -> FRAME: __libc_start_main -> FRAME: _start -> FRAME: Unknown -> THREAD: prime_number 1
-FRAME: backtrace::backtrace::trace::h3e91a3123a3049a5 -> FRAME: pprof::profiler::perf_signal_handler::h7b995c4ab2e66493 -> FRAME: Unknown -> FRAME: prime_number::main::h47f1058543990c8b -> FRAME: std::rt::lang_start::{{closure}}::h4262e250f8024b06 -> FRAME: std::rt::lang_start_internal::{{closure}}::h812f70926ebbddd0 -> std::panicking::try::do_call::h3210e2ce6a68897b -> FRAME: __rust_maybe_catch_panic -> FRAME: std::panicking::try::h28c2e2ec1c3871ce -> std::panic::catch_unwind::h05e542185e35aabf -> std::rt::lang_start_internal::hd7efcfd33686f472 -> FRAME: main -> FRAME: __libc_start_main -> FRAME: _start -> FRAME: Unknown -> THREAD: prime_number 1
-```
-
 
 ## Features
 
-- `cpp` enables the cpp demangle.
-- `flamegraph` enables the flamegraph report format.
-- `prost-codec` enables the pprof protobuf report format through `prost`.
-- `protobuf-codec` enables the pprof protobuf report format through `protobuf` crate.
-- `frame-pointer` gets the backtrace through frame pointer. **only available for nightly**
+- `cpp` enables C++ symbol demangling.
+- `flamegraph` enables flamegraph SVG generation via `inferno`.
+- `prost-codec` enables pprof protobuf output via `prost`.
+- `protobuf-codec` enables pprof protobuf output via `protobuf` crate.
+- `framehop-unwinder` enables framehop-based stack unwinding.
+- `frame-pointer` gets the backtrace through frame pointer.
+- `criterion` integrates with Criterion benchmark profiling.
 
 ## Flamegraph
 
-```toml
-pprof = { version = "0.15", features = ["flamegraph"] }
-```
-
-If `flamegraph` feature is enabled, you can generate flamegraph from the report. `Report` struct has a method `flamegraph` which can generate flamegraph and write it into a `Write`.
-
 ```rust
 if let Ok(report) = guard.report().build() {
-    let file = File::create("flamegraph.svg").unwrap();
+    let file = std::fs::File::create("flamegraph.svg").unwrap();
     report.flamegraph(file).unwrap();
-};
+}
 ```
 
-Additionally, custom flamegraph options can be specified.
+Custom options:
 
 ```rust
 if let Ok(report) = guard.report().build() {
-    let file = File::create("flamegraph.svg").unwrap();
-    let mut options = pprof::flamegraph::Options::default();
+    let file = std::fs::File::create("flamegraph.svg").unwrap();
+    let mut options = rpprof::flamegraph::Options::default();
     options.image_width = Some(2500);
     report.flamegraph_with_options(file, &mut options).unwrap();
-};
+}
 ```
 
-Here is an example of generated flamegraph:
+## Protobuf Export
 
-![flamegraph](https://user-images.githubusercontent.com/5244316/68021936-c1265e80-fcdd-11e9-8fa5-62b548bc751d.png)
-
-## Frame Post Processor
-
-Before the report was generated, `frame_post_processor` was provided as an interface to modify raw statistic data. If you want to group several symbols/thread or demangle for some symbols, this feature will benefit you.
-
-For example:
+With `prost-codec` enabled:
 
 ```rust
-fn frames_post_processor() -> impl Fn(&mut pprof::Frames) {
+if let Ok(report) = guard.report().build() {
+    let mut file = std::fs::File::create("profile.pb").unwrap();
+    let profile = report.pprof().unwrap();
+
+    let mut content = Vec::new();
+    profile.encode(&mut content).unwrap();
+    std::io::Write::write_all(&mut file, &content).unwrap();
+}
+```
+
+Inspect with standard `go tool pprof`:
+
+```shell
+pprof -http=:8080 profile.pb
+```
+
+## License
+
+This project is licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
     let thread_rename = [
         (Regex::new(r"^grpc-server-\d*$").unwrap(), "grpc-server"),
         (Regex::new(r"^cop-high\d*$").unwrap(), "cop-high"),

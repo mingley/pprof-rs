@@ -45,7 +45,7 @@ fn prepare_prime_numbers() -> Vec<usize> {
 fn main() {
     let prime_numbers = Arc::new(prepare_prime_numbers());
 
-    let guard = pprof::ProfilerGuard::new(100).unwrap();
+    let guard = rpprof::ProfilerGuard::new(100).unwrap();
 
     let p1 = prime_numbers.clone();
     std::thread::Builder::new()

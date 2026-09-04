@@ -61,6 +61,7 @@ impl From<PerfMapSymbol> for Symbol {
 fn touch(path: &PathBuf) -> Result<(), Error> {
     std::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(path)
         .map_err(|_| Error::CreatingError)?;

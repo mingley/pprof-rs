@@ -77,7 +77,7 @@ fn prepare_prime_numbers() -> Vec<usize> {
 fn main() {
     let prime_numbers = prepare_prime_numbers();
 
-    let guard = pprof::ProfilerGuard::new(100).unwrap();
+    let guard = rpprof::ProfilerGuard::new(100).unwrap();
 
     let mut v = 0;
 
@@ -101,6 +101,6 @@ fn main() {
         let file = File::create("flamegraph.svg").unwrap();
         report.flamegraph(file).unwrap();
 
-        println!("report: {:?}", &report);
+        println!("report: {:?}", report);
     };
 }

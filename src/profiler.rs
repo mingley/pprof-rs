@@ -2,6 +2,7 @@
 
 use std::convert::TryInto;
 use std::os::raw::c_int;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use nix::sys::signal;
@@ -27,6 +28,11 @@ use crate::{MAX_DEPTH, MAX_THREAD_NAME};
 
 pub(crate) static PROFILER: Lazy<RwLock<Result<Profiler>>> =
     Lazy::new(|| RwLock::new(Profiler::new()));
+
+/// Number of SIGPROF ticks dropped because the profiler lock could not be
+/// acquired in the signal handler. Each dropped tick corresponds to one missed
+/// sampling interval. Reset to zero when the profiler starts.
+pub(crate) static MISSED_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 pub struct Profiler {
     pub(crate) data: Collector<UnresolvedFrames>,
@@ -198,11 +204,16 @@ impl ProfilerGuard<'_> {
     }
 
     /// Generate a report
-    pub fn report(&self) -> ReportBuilder {
+    pub fn report(&self) -> ReportBuilder<'_> {
         ReportBuilder::new(
             self.profiler,
             self.timer.as_ref().map(Timer::timing).unwrap_or_default(),
         )
+    }
+
+    /// Returns the number of samples dropped due to lock contention in the signal handler.
+    pub fn missed_samples(&self) -> u64 {
+        MISSED_SAMPLES.load(Ordering::Relaxed)
     }
 }
 
@@ -341,11 +352,11 @@ extern "C" fn perf_signal_handler(
 
                 #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
                 let addr = unsafe {
-                    let mcontext = (*ucontext).uc_mcontext;
+                    let mcontext = std::ptr::addr_of!((*ucontext).uc_mcontext).read_unaligned();
                     if mcontext.is_null() {
                         0
                     } else {
-                        (*mcontext).__ss.__rip as usize
+                        std::ptr::addr_of!((*mcontext).__ss.__rip).read_unaligned() as usize
                     }
                 };
 
@@ -360,11 +371,11 @@ extern "C" fn perf_signal_handler(
 
                 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
                 let addr = unsafe {
-                    let mcontext = (*ucontext).uc_mcontext;
+                    let mcontext = std::ptr::addr_of!((*ucontext).uc_mcontext).read_unaligned();
                     if mcontext.is_null() {
                         0
                     } else {
-                        (*mcontext).__ss.__pc as usize
+                        std::ptr::addr_of!((*mcontext).__ss.__pc).read_unaligned() as usize
                     }
                 };
 
@@ -411,6 +422,8 @@ extern "C" fn perf_signal_handler(
             let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
             profiler.sample(bt, name.to_bytes(), current_thread as u64, sample_timestamp);
         }
+    } else {
+        MISSED_SAMPLES.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -458,10 +471,17 @@ impl Profiler {
             Err(Error::Running)
         } else {
             self.register_signal_handler()?;
+            MISSED_SAMPLES.store(0, Ordering::Relaxed);
             self.running = true;
 
             Ok(())
         }
+    }
+
+    /// Number of samples dropped due to lock contention in the signal handler.
+    #[allow(dead_code)]
+    pub fn missed_samples() -> u64 {
+        MISSED_SAMPLES.load(Ordering::Relaxed)
     }
 
     fn init(&mut self) -> Result<()> {
@@ -506,7 +526,16 @@ impl Profiler {
 
     fn unregister_signal_handler(&mut self) -> Result<()> {
         if let Some(old_action) = self.old_sigaction.take() {
-            unsafe { signal::sigaction(signal::SIGPROF, &old_action) }?;
+            if old_action.handler() == signal::SigHandler::SigDfl {
+                let ignore = signal::SigAction::new(
+                    signal::SigHandler::SigIgn,
+                    signal::SaFlags::empty(),
+                    signal::SigSet::empty(),
+                );
+                unsafe { signal::sigaction(signal::SIGPROF, &ignore) }?;
+            } else {
+                unsafe { signal::sigaction(signal::SIGPROF, &old_action) }?;
+            }
         }
         Ok(())
     }
@@ -597,5 +626,33 @@ pub mod tests {
 
         drop(timer);
         PROFILER.write().as_mut().unwrap().stop().unwrap();
+    }
+
+    #[test]
+    fn test_missed_samples_counter() {
+        trigger_lazy();
+        MISSED_SAMPLES.store(42, Ordering::Relaxed);
+        let guard = ProfilerGuard::new(100).unwrap();
+        assert_eq!(guard.missed_samples(), 0);
+
+        // Simulated missed sample (e.g. from lock contention in signal handler)
+        MISSED_SAMPLES.fetch_add(5, Ordering::Relaxed);
+        assert_eq!(guard.missed_samples(), 5);
+
+        let report = guard.report().build().unwrap();
+        assert_eq!(report.missed_samples, 5);
+    }
+
+    #[test]
+    fn test_stray_sigprof_handling() {
+        trigger_lazy();
+        {
+            let _guard = ProfilerGuard::new(100).unwrap();
+        }
+        // Profiler guard is dropped, unregister_signal_handler should have set SIG_IGN
+        // (since original disposition was default/none), so raising SIGPROF must NOT terminate the process.
+        unsafe {
+            libc::raise(libc::SIGPROF);
+        }
     }
 }

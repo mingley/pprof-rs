@@ -89,7 +89,8 @@ pub mod frame_pointer;
         target_arch = "riscv64",
         target_arch = "loongarch64"
     ),
-    feature = "frame-pointer"
+    feature = "frame-pointer",
+    not(feature = "framehop-unwinder")
 ))]
 pub use frame_pointer::Trace as TraceImpl;
 
