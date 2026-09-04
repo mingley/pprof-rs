@@ -1,6 +1,8 @@
 # rpprof
 
-`rpprof` is a modern, actively maintained CPU and memory profiler for Rust programs. It is an updated continuation of `pprof-rs` with zero cargo-deny security advisories, bug fixes for signal delivery and unwinding, and observability for dropped samples.
+`rpprof` is a modern, actively maintained CPU and memory profiler for Rust programs. It is a fork of [`tikv/pprof-rs`](https://github.com/tikv/pprof-rs) created to provide timely updates, bug fixes, and active maintenance because the upstream repository is largely inactive/unresponsive and needs some love.
+
+`rpprof` brings dependency trees up to date with zero `cargo-deny` security advisories, fixes long-standing signal handling and unwinding bugs, and adds first-class observability for dropped samples.
 
 [![Crates.io](https://img.shields.io/crates/v/rpprof.svg)](https://crates.io/crates/rpprof)
 [![Documentation](https://docs.rs/rpprof/badge.svg)](https://docs.rs/rpprof)
