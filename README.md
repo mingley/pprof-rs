@@ -160,7 +160,7 @@ criterion_main!(benches);
 
 ## Minimum Supported Rust Version (MSRV)
 
-Rust **1.86.0** (Rust 2024 Edition) or higher.
+Rust **1.88.0** (Rust 2024 Edition) or higher.
 
 ## License
 
