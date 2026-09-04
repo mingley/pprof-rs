@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Migrated to Rust 2024 edition.
-- Increased MSRV to 1.88.0.
+- Set MSRV to 1.96.0 (targeting Rust 1.98 toolchain).
 - Dual-licensed as MIT OR Apache-2.0.
 - Upgraded `inferno` to 0.12 (fixes `quick-xml` CVEs).
 - Upgraded `prost` and `prost-build` to range `>=0.12, <0.15` (fixes `bytes` and `anyhow` vulnerabilities).
