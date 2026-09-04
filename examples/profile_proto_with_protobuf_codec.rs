@@ -12,7 +12,7 @@ fn is_prime_number1(v: usize, prime_numbers: &[usize]) -> bool {
     }
 
     for n in prime_numbers {
-        if v % n == 0 {
+        if v.is_multiple_of(*n) {
             return false;
         }
     }
@@ -28,7 +28,7 @@ fn is_prime_number2(v: usize, prime_numbers: &[usize]) -> bool {
     }
 
     for n in prime_numbers {
-        if v % n == 0 {
+        if v.is_multiple_of(*n) {
             return false;
         }
     }
@@ -44,7 +44,7 @@ fn is_prime_number3(v: usize, prime_numbers: &[usize]) -> bool {
     }
 
     for n in prime_numbers {
-        if v % n == 0 {
+        if v.is_multiple_of(*n) {
             return false;
         }
     }

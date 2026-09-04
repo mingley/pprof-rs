@@ -10,7 +10,7 @@ fn is_prime_number(v: usize, prime_numbers: Arc<Vec<usize>>) -> bool {
     }
 
     for n in prime_numbers.iter() {
-        if v % n == 0 {
+        if v.is_multiple_of(*n) {
             return false;
         }
     }

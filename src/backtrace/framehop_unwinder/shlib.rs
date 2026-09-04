@@ -60,17 +60,17 @@ fn find_objects() -> Vec<Module<Vec<u8>>> {
         let path = PathBuf::from(shlib.name());
         let base_avma = shlib.actual_load_addr().0 as u64;
         let avma_range = base_avma..base_avma + shlib.len() as u64;
-        if let Some(mmap) = open_mmap(&path) {
-            if let Ok(obj) = object::File::parse(&*mmap) {
-                let section_info = ObjectInfo(obj);
+        if let Some(mmap) = open_mmap(&path)
+            && let Ok(obj) = object::File::parse(&*mmap)
+        {
+            let section_info = ObjectInfo(obj);
 
-                objects.push(Module::new(
-                    path.to_string_lossy().to_string(),
-                    avma_range,
-                    base_avma,
-                    section_info,
-                ));
-            }
+            objects.push(Module::new(
+                path.to_string_lossy().to_string(),
+                avma_range,
+                base_avma,
+                section_info,
+            ));
         }
     });
 

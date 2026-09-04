@@ -17,10 +17,10 @@ use crate::{MAX_DEPTH, MAX_THREAD_NAME};
 fn resolve_in_perfmap(ip: usize) -> Option<Symbol> {
     use crate::perfmap::get_resolver;
 
-    if let Some(perf_map_resolver) = get_resolver().as_ref() {
-        if let Some(symbol) = perf_map_resolver.find(ip as _) {
-            return Some(Symbol::from(symbol));
-        }
+    if let Some(perf_map_resolver) = get_resolver().as_ref()
+        && let Some(symbol) = perf_map_resolver.find(ip as _)
+    {
+        return Some(Symbol::from(symbol));
     }
 
     None
