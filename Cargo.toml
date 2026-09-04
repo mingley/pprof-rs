@@ -8,7 +8,7 @@ description = "An updated, maintained CPU and memory profiling tool for Rust pro
 repository = "https://github.com/mingley/pprof-rs"
 documentation = "https://docs.rs/rpprof/"
 readme = "README.md"
-rust-version = "1.96.0"  # MSRV
+rust-version = "1.88.0"  # MSRV
 keywords = ["profiler", "pprof", "cpu-profiler", "flamegraph", "perf"]
 categories = ["development-tools::profiling"]
 

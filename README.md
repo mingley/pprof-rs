@@ -160,7 +160,7 @@ criterion_main!(benches);
 
 ## Minimum Supported Rust Version (MSRV)
 
-Rust **1.96.0** (Rust 2024 Edition) or higher. Target/development toolchain is Rust **1.98**.
+Rust **1.88.0** (Rust 2024 Edition) or higher. Target/development toolchain is Rust **1.98**.
 
 ## License
 
