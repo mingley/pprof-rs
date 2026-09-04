@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-04
+
+### Added
+- Added `ClockType` enum (`Cpu` / `Wall`) supporting both CPU-time profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) to diagnose off-CPU, I/O, lock, and network latency bottlenecks.
+- Added `ProfilerGuard::with_clock_type(frequency, clock_type)` and `ProfilerGuardBuilder::clock_type(clock_type)`.
+- Added `ProfilerGuardBuilder::thread_blocklist(&[substrings])` for async-signal-safe thread filtering by name.
+- Added `Report::write_folded(&mut writer)` for streaming raw folded stacks directly to any `std::io::Write` target.
+- Added `Report::write_speedscope(&mut writer, name)` for direct export to Speedscope JSON format without external tooling.
+- Added metrics and summary accessors on `Report` and `UnresolvedReport`: `total_samples()`, `unique_stacks()`, `duration()`, `samples_per_second()`, and `clock_type()`.
+
+### Fixed
+- Fixed thread name capture on macOS and Linux musl targets where `target_env = "gnu"` check previously failed and caused thread names to fall back to raw numeric thread IDs.
+- Fixed `HashCounter::iter()` to use `self.buckets.iter().flat_map(...)`, eliminating 4,095 heap allocations (`Box<dyn Iterator>`) and a 4,096-frame-deep recursion on each report generation.
+
 ## [0.16.1] - 2026-09-04
 
 ### Changed

@@ -74,6 +74,7 @@ pub use self::error::{Error, Result};
 pub use self::frames::{Frames, Symbol};
 pub use self::profiler::{ProfilerGuard, ProfilerGuardBuilder};
 pub use self::report::{Report, ReportBuilder, UnresolvedReport};
+pub use self::timer::ClockType;
 
 #[cfg(feature = "flamegraph")]
 pub use inferno::flamegraph;

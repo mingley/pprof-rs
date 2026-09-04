@@ -150,6 +150,201 @@ impl<'a> ReportBuilder<'a> {
     }
 }
 
+impl Report {
+    /// Returns the total number of sample hits collected across all stack traces.
+    pub fn total_samples(&self) -> usize {
+        self.data.values().map(|&v| v.max(0) as usize).sum()
+    }
+
+    /// Returns the number of unique backtraces recorded.
+    pub fn unique_stacks(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns the collection duration.
+    pub fn duration(&self) -> std::time::Duration {
+        self.timing.duration
+    }
+
+    /// Returns the clock type used for profiling.
+    pub fn clock_type(&self) -> crate::timer::ClockType {
+        self.timing.clock_type
+    }
+
+    /// Calculates the effective samples collected per second across the collection duration.
+    pub fn samples_per_second(&self) -> f64 {
+        let secs = self.timing.duration.as_secs_f64();
+        if secs > 0.0 {
+            self.total_samples() as f64 / secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Writes raw folded stacks in the standard format:
+    /// `thread;frame1;frame2 count\n`
+    ///
+    /// This format is universally supported by Brendan Gregg's FlameGraph scripts,
+    /// speedscope (speedscope.app), and other performance analysis tools.
+    pub fn write_folded<W: std::io::Write>(&self, mut writer: W) -> std::io::Result<()> {
+        for (key, value) in &self.data {
+            if *value <= 0 {
+                continue;
+            }
+            write!(writer, "{}", key.thread_name_or_id())?;
+
+            for frame in key.frames.iter().rev() {
+                for symbol in frame.iter().rev() {
+                    write!(writer, ";{}", symbol)?;
+                }
+            }
+
+            writeln!(writer, " {}", value)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the report as a JSON file conforming to the Speedscope file format
+    /// (https://www.speedscope.app/file-format-schema.json).
+    ///
+    /// The resulting file can be opened directly in https://www.speedscope.app
+    /// for interactive flamegraphs, sandwich views, and left-heavy analysis.
+    pub fn write_speedscope<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        name: &str,
+    ) -> std::io::Result<()> {
+        let mut frame_indices: HashMap<String, usize> = HashMap::new();
+        let mut frame_names: Vec<String> = Vec::new();
+
+        let mut get_frame_idx = |frame_name: &str| -> usize {
+            if let Some(&idx) = frame_indices.get(frame_name) {
+                idx
+            } else {
+                let idx = frame_names.len();
+                frame_indices.insert(frame_name.to_string(), idx);
+                frame_names.push(frame_name.to_string());
+                idx
+            }
+        };
+
+        let mut samples: Vec<Vec<usize>> = Vec::new();
+        let mut weights: Vec<usize> = Vec::new();
+        let mut total_weight: usize = 0;
+
+        for (key, value) in &self.data {
+            if *value <= 0 {
+                continue;
+            }
+            let weight = *value as usize;
+            let mut sample = Vec::new();
+            sample.push(get_frame_idx(&key.thread_name_or_id()));
+
+            for frame in key.frames.iter().rev() {
+                for symbol in frame.iter().rev() {
+                    sample.push(get_frame_idx(&symbol.to_string()));
+                }
+            }
+
+            samples.push(sample);
+            weights.push(weight);
+            total_weight += weight;
+        }
+
+        fn escape_json(s: &str) -> String {
+            let mut out = String::with_capacity(s.len() + 8);
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => {
+                        use std::fmt::Write;
+                        let _ = write!(&mut out, "\\u{:04x}", c as u32);
+                    }
+                    c => out.push(c),
+                }
+            }
+            out
+        }
+
+        write!(
+            writer,
+            "{{\"$schema\":\"https://www.speedscope.app/file-format-schema.json\",\"version\":\"0.0.1\",\"exporter\":\"rpprof\",\"name\":\"{}\",\"activeProfileIndex\":0,\"profiles\":[{{\"type\":\"sampled\",\"name\":\"{}\",\"unit\":\"count\",\"startValue\":0,\"endValue\":{},\"samples\":[",
+            escape_json(name),
+            escape_json(name),
+            total_weight
+        )?;
+
+        for (i, sample) in samples.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ",")?;
+            }
+            write!(writer, "[")?;
+            for (j, &idx) in sample.iter().enumerate() {
+                if j > 0 {
+                    write!(writer, ",")?;
+                }
+                write!(writer, "{}", idx)?;
+            }
+            write!(writer, "]")?;
+        }
+
+        write!(writer, "],\"weights\":[")?;
+        for (i, &weight) in weights.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ",")?;
+            }
+            write!(writer, "{}", weight)?;
+        }
+        write!(writer, "]}}],\"shared\":{{\"frames\":[")?;
+
+        for (i, fname) in frame_names.iter().enumerate() {
+            if i > 0 {
+                write!(writer, ",")?;
+            }
+            write!(writer, "{{\"name\":\"{}\"}}", escape_json(fname))?;
+        }
+
+        write!(writer, "]}}}}")?;
+        Ok(())
+    }
+}
+
+impl UnresolvedReport {
+    /// Returns the total number of sample hits collected across all stack traces.
+    pub fn total_samples(&self) -> usize {
+        self.data.values().map(|&v| v.max(0) as usize).sum()
+    }
+
+    /// Returns the number of unique backtraces recorded.
+    pub fn unique_stacks(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns the collection duration.
+    pub fn duration(&self) -> std::time::Duration {
+        self.timing.duration
+    }
+
+    /// Returns the clock type used for profiling.
+    pub fn clock_type(&self) -> crate::timer::ClockType {
+        self.timing.clock_type
+    }
+
+    /// Calculates the effective samples collected per second across the collection duration.
+    pub fn samples_per_second(&self) -> f64 {
+        let secs = self.timing.duration.as_secs_f64();
+        if secs > 0.0 {
+            self.total_samples() as f64 / secs
+        } else {
+            0.0
+        }
+    }
+}
+
 /// This will generate Report in a human-readable format:
 ///
 /// ```shell
@@ -359,5 +554,60 @@ mod protobuf {
             };
             Ok(profile)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Symbol;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn test_report_metrics_and_folded() {
+        let mut data = HashMap::new();
+        let frames = Frames {
+            frames: vec![vec![Symbol {
+                name: Some(b"my_func".to_vec()),
+                addr: None,
+                lineno: Some(10),
+                filename: None,
+            }]],
+            thread_name: "main".to_string(),
+            thread_id: 1,
+            sample_timestamp: SystemTime::UNIX_EPOCH,
+        };
+        data.insert(frames, 42);
+
+        let report = Report {
+            data,
+            timing: ReportTiming {
+                frequency: 100,
+                start_time: SystemTime::UNIX_EPOCH,
+                duration: Duration::from_secs(2),
+                clock_type: crate::timer::ClockType::Cpu,
+            },
+            missed_samples: 0,
+        };
+
+        assert_eq!(report.total_samples(), 42);
+        assert_eq!(report.unique_stacks(), 1);
+        assert_eq!(report.duration(), Duration::from_secs(2));
+        assert_eq!(report.samples_per_second(), 21.0);
+        assert_eq!(report.clock_type(), crate::timer::ClockType::Cpu);
+
+        let mut folded_output = Vec::new();
+        report.write_folded(&mut folded_output).unwrap();
+        let folded_str = String::from_utf8(folded_output).unwrap();
+        assert!(folded_str.contains("main;my_func 42"));
+
+        let mut speedscope_output = Vec::new();
+        report
+            .write_speedscope(&mut speedscope_output, "test_profile")
+            .unwrap();
+        let speedscope_str = String::from_utf8(speedscope_output).unwrap();
+        assert!(speedscope_str.contains("\"exporter\":\"rpprof\""));
+        assert!(speedscope_str.contains("\"name\":\"test_profile\""));
+        assert!(speedscope_str.contains("\"name\":\"my_func\""));
     }
 }

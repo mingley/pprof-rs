@@ -23,7 +23,7 @@ use crate::collector::Collector;
 use crate::error::{Error, Result};
 use crate::frames::UnresolvedFrames;
 use crate::report::ReportBuilder;
-use crate::timer::Timer;
+use crate::timer::{ClockType, Timer};
 use crate::{MAX_DEPTH, MAX_THREAD_NAME};
 
 pub(crate) static PROFILER: Lazy<RwLock<Result<Profiler>>> =
@@ -40,6 +40,8 @@ pub struct Profiler {
 
     old_sigaction: Option<signal::SigAction>,
     running: bool,
+    clock_type: ClockType,
+    thread_blocklist: Vec<Vec<u8>>,
 
     #[cfg(feature = "frame-pointer")]
     on_stack: bool,
@@ -56,6 +58,8 @@ pub struct Profiler {
 #[derive(Clone)]
 pub struct ProfilerGuardBuilder {
     frequency: c_int,
+    clock_type: ClockType,
+    thread_blocklist: Vec<Vec<u8>>,
 
     #[cfg(feature = "frame-pointer")]
     on_stack: bool,
@@ -73,6 +77,8 @@ impl Default for ProfilerGuardBuilder {
     fn default() -> ProfilerGuardBuilder {
         ProfilerGuardBuilder {
             frequency: 99,
+            clock_type: ClockType::Cpu,
+            thread_blocklist: Vec::new(),
 
             #[cfg(feature = "frame-pointer")]
             on_stack: false,
@@ -89,8 +95,31 @@ impl Default for ProfilerGuardBuilder {
 }
 
 impl ProfilerGuardBuilder {
+    /// Creates a new `ProfilerGuardBuilder` with default configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the sampling frequency in Hz.
     pub fn frequency(self, frequency: c_int) -> Self {
         Self { frequency, ..self }
+    }
+
+    /// Sets the clock type used for profiling (CPU time or real Wall-clock time).
+    pub fn clock_type(self, clock_type: ClockType) -> Self {
+        Self { clock_type, ..self }
+    }
+
+    /// Excludes threads whose names contain any of the given substrings from profiling.
+    pub fn thread_blocklist<T: AsRef<str>>(self, blocklist: &[T]) -> Self {
+        let thread_blocklist = blocklist
+            .iter()
+            .map(|s| s.as_ref().as_bytes().to_vec())
+            .collect();
+        Self {
+            thread_blocklist,
+            ..self
+        }
     }
 
     #[cfg(feature = "frame-pointer")]
@@ -173,10 +202,10 @@ impl ProfilerGuardBuilder {
                     profiler.blocklist_segments = self.blocklist_segments;
                 }
 
-                match profiler.start() {
+                match profiler.start(self.clock_type, self.thread_blocklist) {
                     Ok(()) => Ok(ProfilerGuard::<'static> {
                         profiler: &PROFILER,
-                        timer: Some(Timer::new(self.frequency)),
+                        timer: Some(Timer::with_clock_type(self.frequency, self.clock_type)),
                     }),
                     Err(err) => Err(err),
                 }
@@ -201,6 +230,17 @@ impl ProfilerGuard<'_> {
     /// Start profiling with given sample frequency.
     pub fn new(frequency: c_int) -> Result<ProfilerGuard<'static>> {
         ProfilerGuardBuilder::default().frequency(frequency).build()
+    }
+
+    /// Start profiling with given sample frequency and clock type.
+    pub fn with_clock_type(
+        frequency: c_int,
+        clock_type: ClockType,
+    ) -> Result<ProfilerGuard<'static>> {
+        ProfilerGuardBuilder::default()
+            .frequency(frequency)
+            .clock_type(clock_type)
+            .build()
     }
 
     /// Generate a report
@@ -256,19 +296,25 @@ fn write_thread_name_fallback(current_thread: libc::pthread_t, name: &mut [libc:
     }
 }
 
-#[cfg(not(all(any(target_os = "linux", target_os = "macos"), target_env = "gnu")))]
-fn write_thread_name(current_thread: libc::pthread_t, name: &mut [libc::c_char]) {
-    write_thread_name_fallback(current_thread, name);
-}
-
-#[cfg(all(any(target_os = "linux", target_os = "macos"), target_env = "gnu"))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+))]
 fn write_thread_name(current_thread: libc::pthread_t, name: &mut [libc::c_char]) {
     let name_ptr = name as *mut [libc::c_char] as *mut libc::c_char;
     let ret = unsafe { libc::pthread_getname_np(current_thread, name_ptr, MAX_THREAD_NAME) };
 
-    if ret != 0 {
+    if ret != 0 || name[0] == 0 {
         write_thread_name_fallback(current_thread, name);
     }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+)))]
+fn write_thread_name(current_thread: libc::pthread_t, name: &mut [libc::c_char]) {
+    write_thread_name_fallback(current_thread, name);
 }
 
 struct ErrnoProtector(libc::c_int);
@@ -420,7 +466,13 @@ extern "C" fn perf_signal_handler(
             write_thread_name(current_thread, &mut name);
 
             let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
-            profiler.sample(bt, name.to_bytes(), current_thread as u64, sample_timestamp);
+            let name_bytes = name.to_bytes();
+
+            if profiler.is_thread_blocklisted(name_bytes) {
+                return;
+            }
+
+            profiler.sample(bt, name_bytes, current_thread as u64, sample_timestamp);
         }
     } else {
         MISSED_SAMPLES.fetch_add(1, Ordering::Relaxed);
@@ -434,6 +486,8 @@ impl Profiler {
             sample_counter: 0,
             old_sigaction: None,
             running: false,
+            clock_type: ClockType::Cpu,
+            thread_blocklist: Vec::new(),
 
             #[cfg(feature = "frame-pointer")]
             on_stack: false,
@@ -446,6 +500,19 @@ impl Profiler {
             ))]
             blocklist_segments: Vec::new(),
         })
+    }
+
+    fn is_thread_blocklisted(&self, thread_name: &[u8]) -> bool {
+        for blocked in &self.thread_blocklist {
+            if !blocked.is_empty()
+                && thread_name
+                    .windows(blocked.len())
+                    .any(|window| window == blocked.as_slice())
+            {
+                return true;
+            }
+        }
+        false
     }
 
     #[cfg(any(
@@ -465,11 +532,13 @@ impl Profiler {
 }
 
 impl Profiler {
-    pub fn start(&mut self) -> Result<()> {
-        log::info!("starting cpu profiler");
+    pub fn start(&mut self, clock_type: ClockType, thread_blocklist: Vec<Vec<u8>>) -> Result<()> {
+        log::info!("starting {:?} profiler", clock_type);
         if self.running {
             Err(Error::Running)
         } else {
+            self.clock_type = clock_type;
+            self.thread_blocklist = thread_blocklist;
             self.register_signal_handler()?;
             MISSED_SAMPLES.store(0, Ordering::Relaxed);
             self.running = true;
@@ -493,7 +562,7 @@ impl Profiler {
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        log::info!("stopping cpu profiler");
+        log::info!("stopping profiler");
         if self.running {
             self.unregister_signal_handler()?;
             self.init()?;
@@ -519,12 +588,20 @@ impl Profiler {
             flags
         };
         let sigaction = signal::SigAction::new(handler, flags, signal::SigSet::empty());
-        let old_action = unsafe { signal::sigaction(signal::SIGPROF, &sigaction) }?;
+        let sig = match self.clock_type {
+            ClockType::Cpu => signal::Signal::SIGPROF,
+            ClockType::Wall => signal::Signal::SIGALRM,
+        };
+        let old_action = unsafe { signal::sigaction(sig, &sigaction) }?;
         self.old_sigaction = Some(old_action);
         Ok(())
     }
 
     fn unregister_signal_handler(&mut self) -> Result<()> {
+        let sig = match self.clock_type {
+            ClockType::Cpu => signal::Signal::SIGPROF,
+            ClockType::Wall => signal::Signal::SIGALRM,
+        };
         if let Some(old_action) = self.old_sigaction.take() {
             if matches!(old_action.handler(), signal::SigHandler::SigDfl) {
                 let ignore = signal::SigAction::new(
@@ -532,9 +609,9 @@ impl Profiler {
                     signal::SaFlags::empty(),
                     signal::SigSet::empty(),
                 );
-                unsafe { signal::sigaction(signal::SIGPROF, &ignore) }?;
+                unsafe { signal::sigaction(sig, &ignore) }?;
             } else {
-                unsafe { signal::sigaction(signal::SIGPROF, &old_action) }?;
+                unsafe { signal::sigaction(sig, &old_action) }?;
             }
         }
         Ok(())
@@ -609,7 +686,12 @@ pub mod tests {
         // record the allocation count.
 
         trigger_lazy();
-        PROFILER.write().as_mut().unwrap().start().unwrap();
+        PROFILER
+            .write()
+            .as_mut()
+            .unwrap()
+            .start(ClockType::Cpu, Vec::new())
+            .unwrap();
         let timer = Timer::new(999);
         let start = std::time::Instant::now();
         ALLOC.enable_count_alloc();
@@ -654,5 +736,40 @@ pub mod tests {
         unsafe {
             libc::raise(libc::SIGPROF);
         }
+    }
+
+    #[test]
+    fn test_wall_clock_profiling() {
+        trigger_lazy();
+        let guard = ProfilerGuard::with_clock_type(100, ClockType::Wall).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let report = guard.report().build().unwrap();
+        assert_eq!(report.clock_type(), ClockType::Wall);
+    }
+
+    #[test]
+    fn test_thread_blocklist_filter() {
+        trigger_lazy();
+        let profiler = Profiler {
+            data: Collector::new().unwrap(),
+            sample_counter: 0,
+            old_sigaction: None,
+            running: false,
+            clock_type: ClockType::Cpu,
+            thread_blocklist: vec![b"worker".to_vec(), b"tokio".to_vec()],
+            #[cfg(feature = "frame-pointer")]
+            on_stack: false,
+            #[cfg(any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "loongarch64"
+            ))]
+            blocklist_segments: Vec::new(),
+        };
+
+        assert!(profiler.is_thread_blocklisted(b"worker-1"));
+        assert!(profiler.is_thread_blocklisted(b"tokio-runtime"));
+        assert!(!profiler.is_thread_blocklisted(b"main"));
     }
 }

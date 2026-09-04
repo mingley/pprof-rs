@@ -11,6 +11,10 @@
 ## Key Changes and Improvements
 
 - **Dependency and Security Updates**: Refreshed dependency trees to resolve security advisories flagged by `cargo-deny` (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
+- **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
+- **Direct Folded Stack & Speedscope Export**: Native `report.write_folded(&mut writer)` and `report.write_speedscope(&mut writer, name)` methods for direct compatibility with [Speedscope](https://www.speedscope.app/) and Brendan Gregg scripts.
+- **Allocation-Free Iterator**: Optimized internal hash collector iteration to eliminate 4,095 heap allocations (`Box<dyn Iterator>`) and recursion on every report build.
+- **Thread Name Capture & Filtering**: Fixed macOS and musl thread name detection, and added `thread_blocklist` for async-signal-safe thread filtering by name.
 - **Missed Sample Observability**: Built-in atomic counter (`guard.missed_samples()` / `Profiler::missed_samples()`) tracking sampling ticks dropped due to lock contention in the signal handler. Missed sample counts are also embedded in generated pprof protobuf profiles.
 - **Stray SIGPROF Protection**: Sets `SIG_IGN` when unregistering the signal handler if the previous disposition was default, preventing trailing timer signals from aborting the process.
 - **macOS Context Alignment**: Safe unaligned reads of `ucontext_t` fields in signal handlers to prevent debug assertions on macOS.
@@ -24,7 +28,7 @@ Add `rpprof` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rpprof = { version = "0.16", features = ["flamegraph", "prost-codec"] }
+rpprof = { version = "0.17", features = ["flamegraph", "prost-codec"] }
 ```
 
 ### Basic Profiling
@@ -43,6 +47,7 @@ fn main() {
     do_work();
 
     if let Ok(report) = guard.report().build() {
+        println!("Total samples: {}", report.total_samples());
         println!("Missed samples: {}", guard.missed_samples());
 
         // Generate a flamegraph
@@ -53,6 +58,34 @@ fn main() {
 
 fn do_work() {
     // ...
+}
+```
+
+### Wall-Clock (Off-CPU) Profiling
+
+To profile wall-clock time (identifying threads blocked on async I/O, database queries, mutex contention, or network requests) instead of only on-CPU time:
+
+```rust
+let guard = rpprof::ProfilerGuardBuilder::default()
+    .frequency(100)
+    .clock_type(rpprof::ClockType::Wall)
+    .build()
+    .unwrap();
+```
+
+### Folded Stacks & Speedscope Export
+
+Export raw folded stack traces (usable with FlameGraph perl scripts, differential flame graphs, or speedscope):
+
+```rust
+if let Ok(report) = guard.report().build() {
+    // Write folded stacks
+    let mut file = std::fs::File::create("profile.folded").unwrap();
+    report.write_folded(&mut file).unwrap();
+
+    // Write Speedscope JSON format (openable at https://www.speedscope.app/)
+    let mut speedscope_file = std::fs::File::create("profile.speedscope.json").unwrap();
+    report.write_speedscope(&mut speedscope_file, "my_service").unwrap();
 }
 ```
 
