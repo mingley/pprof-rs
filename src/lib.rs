@@ -1,47 +1,95 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! rpprof is an integrated profiler for Rust programs.
+//! `rpprof` is a modern CPU, wall-clock, and heap profiler for Rust programs.
 //!
-//! This crate provides a programmable interface to start/stop/report a profiler
-//! dynamically. With the help of this crate, you can easily integrate a
-//! profiler into your Rust program in a modern, convenient way.
+//! It provides low-overhead, async-signal-safe profiling designed for both
+//! production services and local benchmarking.
 //!
-//! A sample usage is:
+//! # Features & Highlights
 //!
-//! ```rust
-//! let guard = rpprof::ProfilerGuard::new(100).unwrap();
+//! - **Zero-Configuration Unwinding**: Fast, allocation-free DWARF stack unwinding via
+//!   `framehop` enabled by default—**no `-Cforce-frame-pointers=yes` or special compiler flags required**.
+//! - **CPU & Wall-Clock Profiling**: Choose between CPU time ([`ClockType::Cpu`]) and real
+//!   wall-clock time ([`ClockType::Wall`]) to capture both compute bottlenecks and off-CPU latency
+//!   (async I/O, database queries, lock contention).
+//! - **Sampled Heap Profiling**: [`alloc::AllocProfiler`] wraps your global allocator to track live
+//!   in-use memory and cumulative allocation churn with `<1%` overhead.
+//! - **Multiple Output Formats**: Export directly to SVG flamegraphs ([`Report::flamegraph`]),
+//!   [Speedscope](https://www.speedscope.app/) JSON ([`Report::write_speedscope`]), raw folded stacks
+//!   ([`Report::write_folded`]), and Google pprof protobuf ([`Report::pprof`]).
+//!
+//! # Quick Start: One-Liner CPU Profiling
+//!
+//! ```rust,no_run
+//! use std::time::Duration;
+//! use std::fs::File;
+//!
+//! // Profile CPU for 10 seconds
+//! let report = rpprof::profile(Duration::from_secs(10)).unwrap();
+//!
+//! // Save an interactive SVG flamegraph
+//! let file = File::create("flamegraph.svg").unwrap();
+//! report.flamegraph(file).unwrap();
 //! ```
 //!
-//! Then you can read report from the guard:
+//! # Guard-Based Profiling
 //!
-//! ```rust
-//! # let guard = rpprof::ProfilerGuard::new(100).unwrap();
-//! if let Ok(report) = guard.report().build() {
-//!     println!("report: {:?}", &report);
-//! };
-//! ```
-//!
-//! More configuration can be passed through `ProfilerGuardBuilder`:
+//! For scoped profiling over specific operations or custom configurations:
 //!
 //! ```rust
 //! let guard = rpprof::ProfilerGuardBuilder::default()
-//!     .frequency(1000)
+//!     .frequency(100)
 //!     .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+//!     .build()
+//!     .unwrap();
+//!
+//! // Run workload...
+//!
+//! if let Ok(report) = guard.report().build() {
+//!     println!("Total samples: {}", report.total_samples());
+//!     println!("Missed ticks: {}", guard.missed_samples());
+//!
+//!     // Write folded stacks
+//!     let mut output = Vec::new();
+//!     report.write_folded(&mut output).unwrap();
+//! };
+//! ```
+//!
+//! # Wall-Clock (Off-CPU) Profiling
+//!
+//! To capture time spent waiting on async tasks, I/O, locks, or network calls:
+//!
+//! ```rust
+//! let guard = rpprof::ProfilerGuardBuilder::default()
+//!     .frequency(100)
+//!     .clock_type(rpprof::ClockType::Wall)
 //!     .build()
 //!     .unwrap();
 //! ```
 //!
-//! The frequency means the sampler frequency, and the `blocklist` means the
-//! profiler will ignore the sample whose first frame is from library containing
-//! these strings.
+//! # Sampled Heap / Memory Profiling
 //!
-//! Skipping `libc`, `libgcc` and `libpthread` could be a solution to the
-//! possible deadlock inside the `_Unwind_Backtrace`, and keep the signal
-//! safety. The dwarf information in "vdso" is incorrect in some distributions,
-//! so it's also suggested to skip it.
+//! Configure [`alloc::AllocProfiler`] as your `#[global_allocator]`:
 //!
-//! You can find more details in
-//! [README.md](https://github.com/mingley/pprof-rs/blob/master/README.md)
+//! ```rust,no_run
+//! use std::fs::File;
+//!
+//! #[global_allocator]
+//! static ALLOC: rpprof::alloc::AllocProfiler = rpprof::alloc::AllocProfiler::system();
+//!
+//! fn main() {
+//!     rpprof::alloc::start();
+//!
+//!     // Run allocation-heavy workload...
+//!
+//!     let heap = rpprof::alloc::heap_report().unwrap();
+//!     let inuse_report = heap.to_inuse_report();
+//!     let mut flame = File::create("heap_inuse.svg").unwrap();
+//!     inuse_report.flamegraph(&mut flame).unwrap();
+//!
+//!     rpprof::alloc::stop();
+//! }
+//! ```
 
 /// Define the MAX supported stack depth. TODO: make this variable mutable.
 #[cfg(feature = "large-depth")]

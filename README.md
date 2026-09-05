@@ -11,7 +11,6 @@
 ## Key Changes and Improvements
 
 - **Dependency and Security Updates**: Refreshed dependency trees to resolve security advisories flagged by `cargo-deny` (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
-- **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
 - **Zero-Configuration Unwinding**: `framehop-unwinder` is enabled by default. Uses pre-parsed DWARF unwind tables for fast, allocation-free, async-signal-safe stack unwinding—**no `-Cforce-frame-pointers=yes` or special release build flags required**.
 - **Sampled Heap / Memory Profiling**: Built-in `rpprof::alloc::AllocProfiler` (`GlobalAlloc` wrapper) with Poisson-sampled allocation tracking (512 KiB default rate), capturing both live in-use memory and cumulative allocation flamegraphs with <1% overhead.
 - **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
