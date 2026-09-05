@@ -1,6 +1,6 @@
 [package]
 name = "rpprof"
-version = "0.18.1"
+version = "0.18.2"
 authors = ["Yang Keao <keao.yang@yahoo.com>", "Michael Ingley <michael.ingley@gmail.com>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
