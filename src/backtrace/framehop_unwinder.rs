@@ -59,7 +59,8 @@ fn get_regs_from_context(ucontext: *mut c_void) -> Option<(UnwindRegsNative, u64
 
     let regs = unsafe { &(*ucontext).uc_mcontext.regs };
     let sp = unsafe { (*ucontext).uc_mcontext.sp };
-    Some((UnwindRegsNative::new(regs[30], sp, regs[29]), regs[30]))
+    let pc = unsafe { (*ucontext).uc_mcontext.pc };
+    Some((UnwindRegsNative::new(regs[30], sp, regs[29]), pc))
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
