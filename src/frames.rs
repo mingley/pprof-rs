@@ -1,10 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::os::raw::c_void;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use smallvec::SmallVec;
@@ -76,6 +78,15 @@ impl UnresolvedFrames {
             thread_name_length,
             thread_id,
             sample_timestamp,
+        }
+    }
+
+    #[cfg(feature = "_protobuf")]
+    pub(crate) fn thread_name_or_id(&self) -> String {
+        if self.thread_name_length > 0 {
+            String::from_utf8_lossy(&self.thread_name[0..self.thread_name_length]).into_owned()
+        } else {
+            format!("{:?}", self.thread_id)
         }
     }
 }
@@ -179,6 +190,77 @@ impl Hash for Symbol {
     }
 }
 
+pub(crate) fn is_signal_handler_symbol(symbol: &Symbol) -> bool {
+    // macOS prepends an underscore even with `#[no_mangle]`
+    matches!(
+        &*symbol.name(),
+        "perf_signal_handler" | "_perf_signal_handler"
+    )
+}
+
+pub(crate) fn resolve_frame_symbols<F: Frame>(frame: &F, out: &mut Vec<Symbol>) {
+    out.clear();
+    let ip = Frame::ip(frame);
+    if let Some(perfmap_symbol) = resolve_in_perfmap(ip) {
+        out.push(perfmap_symbol);
+    } else {
+        frame.resolve_symbol(|symbol| {
+            out.push(Symbol::from(symbol));
+        });
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CachedSymbols {
+    pub(crate) symbols: Arc<[Symbol]>,
+    pub(crate) is_signal_handler: bool,
+}
+
+/// Per-report-build memoization table mapping instruction pointers (`usize`)
+/// to shared `Arc<[Symbol]>` slices so each unique PC is symbolized at most once.
+#[derive(Default)]
+pub(crate) struct SymbolCache {
+    cache: HashMap<usize, CachedSymbols>,
+    scratch: Vec<Symbol>,
+    #[cfg(test)]
+    pub(crate) misses: usize,
+    #[cfg(test)]
+    pub(crate) hits: usize,
+}
+
+impl SymbolCache {
+    pub(crate) fn resolve_ip_with<R>(&mut self, ip: usize, resolve_fn: R) -> &CachedSymbols
+    where
+        R: FnOnce(usize, &mut Vec<Symbol>),
+    {
+        if self.cache.contains_key(&ip) {
+            #[cfg(test)]
+            {
+                self.hits += 1;
+            }
+            return self.cache.get(&ip).unwrap();
+        }
+
+        #[cfg(test)]
+        {
+            self.misses += 1;
+        }
+        self.scratch.clear();
+        resolve_fn(ip, &mut self.scratch);
+        let is_signal_handler = self.scratch.iter().any(is_signal_handler_symbol);
+        let symbols: Arc<[Symbol]> = Arc::from(self.scratch.as_slice());
+        self.cache.entry(ip).or_insert(CachedSymbols {
+            symbols,
+            is_signal_handler,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_cached(&self, ip: usize) -> Option<&Arc<[Symbol]>> {
+        self.cache.get(&ip).map(|c| &c.symbols)
+    }
+}
+
 /// A representation of a backtrace. `thread_name` and `thread_id` was got from `pthread_getname_np`
 /// and `pthread_self`. frames is a vector of symbols.
 #[derive(Clone, PartialEq, Hash)]
@@ -198,40 +280,36 @@ impl Frames {
             format!("{:?}", self.thread_id)
         }
     }
-}
 
-impl From<UnresolvedFrames> for Frames {
-    fn from(frames: UnresolvedFrames) -> Self {
-        let mut fs = Vec::new();
+    pub(crate) fn from_unresolved_with_cache(
+        frames: &UnresolvedFrames,
+        cache: &mut SymbolCache,
+    ) -> Self {
+        Self::from_unresolved_with_resolver(frames, cache, resolve_frame_symbols)
+    }
 
+    pub(crate) fn from_unresolved_with_resolver<R>(
+        frames: &UnresolvedFrames,
+        cache: &mut SymbolCache,
+        mut resolve_fn: R,
+    ) -> Self
+    where
+        R: FnMut(&<TraceImpl as Trace>::Frame, &mut Vec<Symbol>),
+    {
+        let mut fs = Vec::with_capacity(frames.frames.len());
         let mut frame_iter = frames.frames.iter();
 
         while let Some(frame) = frame_iter.next() {
-            let mut symbols: Vec<Symbol> = Vec::new();
-
-            if let Some(perfmap_symbol) = resolve_in_perfmap(crate::backtrace::Frame::ip(frame)) {
-                symbols.push(perfmap_symbol);
-            } else {
-                frame.resolve_symbol(|symbol| {
-                    let symbol = Symbol::from(symbol);
-                    symbols.push(symbol);
-                });
-            }
-
-            if symbols.iter().any(|symbol| {
-                // macOS prepends an underscore even with `#[no_mangle]`
-                matches!(
-                    &*symbol.name(),
-                    "perf_signal_handler" | "_perf_signal_handler"
-                )
-            }) {
+            let ip = Frame::ip(frame);
+            let cached = cache.resolve_ip_with(ip, |_, out| resolve_fn(frame, out));
+            if cached.is_signal_handler {
                 // ignore frame itself and its next one
                 frame_iter.next();
                 continue;
             }
 
-            if !symbols.is_empty() {
-                fs.push(symbols);
+            if !cached.symbols.is_empty() {
+                fs.push(cached.symbols.as_ref().to_vec());
             }
         }
 
@@ -242,6 +320,13 @@ impl From<UnresolvedFrames> for Frames {
             thread_id: frames.thread_id,
             sample_timestamp: frames.sample_timestamp,
         }
+    }
+}
+
+impl From<UnresolvedFrames> for Frames {
+    fn from(frames: UnresolvedFrames) -> Self {
+        let mut cache = SymbolCache::default();
+        Self::from_unresolved_with_cache(&frames, &mut cache)
     }
 }
 
@@ -297,5 +382,145 @@ mod tests {
             &symbol.name(),
             "Map<StringName, Ref<GDScript>, Comparator<StringName>, DefaultAllocator>::has(StringName const&) const"
         )
+    }
+
+    #[test]
+    fn symbol_cache_memoizes_pcs_and_shares_arc_allocations() {
+        let mut cache = SymbolCache::default();
+        let mut resolve_calls = 0usize;
+
+        let mock_resolve = |ip: usize, out: &mut Vec<Symbol>| {
+            resolve_calls += 1;
+            match ip {
+                0x100 => {
+                    out.push(Symbol {
+                        name: Some(b"inlined_leaf".to_vec()),
+                        addr: None,
+                        lineno: Some(12),
+                        filename: Some(PathBuf::from("src/leaf.rs")),
+                    });
+                    out.push(Symbol {
+                        name: Some(b"outer_caller".to_vec()),
+                        addr: None,
+                        lineno: Some(44),
+                        filename: Some(PathBuf::from("src/outer.rs")),
+                    });
+                }
+                0x200 => {
+                    out.push(Symbol {
+                        name: Some(b"_perf_signal_handler".to_vec()),
+                        addr: None,
+                        lineno: Some(1),
+                        filename: None,
+                    });
+                }
+                other => {
+                    out.push(Symbol {
+                        name: Some(format!("fn_{other:x}").into_bytes()),
+                        addr: None,
+                        lineno: Some(other as u32),
+                        filename: Some(PathBuf::from("src/lib.rs")),
+                    });
+                }
+            }
+        };
+
+        let mut mock = mock_resolve;
+        for &pc in &[0x100usize, 0x300, 0x100, 0x200, 0x300, 0x100] {
+            let _ = cache.resolve_ip_with(pc, &mut mock);
+        }
+
+        assert_eq!(resolve_calls, 3, "each unique PC must resolve only once");
+        assert_eq!(cache.misses, 3);
+        assert_eq!(cache.hits, 3);
+
+        let arc_a = Arc::clone(cache.get_cached(0x100).unwrap());
+        let cached_again = cache.resolve_ip_with(0x100, |_, _| {
+            panic!("cached PC should not invoke resolver again");
+        });
+        assert!(Arc::ptr_eq(&arc_a, &cached_again.symbols));
+        assert_eq!(cached_again.symbols.len(), 2);
+        assert!(!cached_again.is_signal_handler);
+
+        let sig = cache.resolve_ip_with(0x200, |_, _| unreachable!());
+        assert!(sig.is_signal_handler);
+    }
+
+    #[cfg(any(feature = "framehop-unwinder", feature = "frame-pointer"))]
+    #[test]
+    fn frames_from_unresolved_uses_pc_cache_across_distinct_stacks() {
+        use crate::backtrace::Trace;
+        type RawFrame = <TraceImpl as Trace>::Frame;
+
+        let mut cache = SymbolCache::default();
+        let stack_a = UnresolvedFrames::new(
+            smallvec::smallvec![
+                RawFrame { ip: 0x10 }, // signal handler -> skips self + next (0x20)
+                RawFrame { ip: 0x20 }, // trampoline (never even symbolized!)
+                RawFrame { ip: 0x30 }, // inlined pair
+                RawFrame { ip: 0x40 }, // shared root
+            ],
+            b"worker-1",
+            1,
+            SystemTime::UNIX_EPOCH,
+        );
+        let stack_b = UnresolvedFrames::new(
+            smallvec::smallvec![
+                RawFrame { ip: 0x50 }, // distinct leaf
+                RawFrame { ip: 0x30 }, // shared inlined pair (cache hit)
+                RawFrame { ip: 0x40 }, // shared root (cache hit)
+            ],
+            b"worker-2",
+            2,
+            SystemTime::UNIX_EPOCH,
+        );
+
+        let mut resolve = |frame: &RawFrame, out: &mut Vec<Symbol>| {
+            let pc = crate::backtrace::Frame::ip(frame);
+            match pc {
+                0x10 => out.push(Symbol {
+                    name: Some(b"perf_signal_handler".to_vec()),
+                    addr: None,
+                    lineno: None,
+                    filename: None,
+                }),
+                0x20 => panic!("trampoline frame after signal handler must be skipped"),
+                0x30 => {
+                    out.push(Symbol {
+                        name: Some(b"inline_inner".to_vec()),
+                        addr: None,
+                        lineno: Some(7),
+                        filename: Some(PathBuf::from("a.rs")),
+                    });
+                    out.push(Symbol {
+                        name: Some(b"inline_outer".to_vec()),
+                        addr: None,
+                        lineno: Some(19),
+                        filename: Some(PathBuf::from("a.rs")),
+                    });
+                }
+                other => out.push(Symbol {
+                    name: Some(format!("func_{other:x}").into_bytes()),
+                    addr: None,
+                    lineno: Some(1),
+                    filename: Some(PathBuf::from("b.rs")),
+                }),
+            }
+        };
+
+        let resolved_a = Frames::from_unresolved_with_resolver(&stack_a, &mut cache, &mut resolve);
+        let resolved_b = Frames::from_unresolved_with_resolver(&stack_b, &mut cache, &mut resolve);
+
+        assert_eq!(
+            cache.misses, 4,
+            "unique PCs resolved: 0x10, 0x30, 0x40, 0x50"
+        );
+        assert_eq!(
+            cache.hits, 2,
+            "shared PCs 0x30 and 0x40 hit cache on stack_b"
+        );
+        assert_eq!(resolved_a.frames.len(), 2);
+        assert_eq!(resolved_a.frames[0].len(), 2);
+        assert_eq!(resolved_b.frames.len(), 3);
     }
 }

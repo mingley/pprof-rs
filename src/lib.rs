@@ -89,6 +89,9 @@ pub mod protos {
     ));
 }
 
+#[cfg(all(feature = "prost-codec", feature = "protobuf-codec"))]
+use prost as _;
+
 #[cfg(feature = "protobuf-codec")]
 pub mod protos {
     pub use protobuf::Message;

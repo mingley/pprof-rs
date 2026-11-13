@@ -64,6 +64,7 @@ impl Timer {
             frequency: self.frequency,
             start_time: self.start_time,
             duration: self.start_instant.elapsed(),
+            dropped_spill_samples: 0,
         }
     }
 }
@@ -97,6 +98,8 @@ pub struct ReportTiming {
     pub start_time: SystemTime,
     /// Collection duration.
     pub duration: Duration,
+    /// Samples dropped because the spill cap (or spill I/O) was reached.
+    pub(crate) dropped_spill_samples: u64,
 }
 
 impl Default for ReportTiming {
@@ -105,6 +108,7 @@ impl Default for ReportTiming {
             frequency: 1,
             start_time: SystemTime::UNIX_EPOCH,
             duration: Default::default(),
+            dropped_spill_samples: 0,
         }
     }
 }

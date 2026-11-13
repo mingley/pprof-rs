@@ -37,6 +37,23 @@ fn bench_write_to_collector(c: &mut Criterion) {
             })
         });
     });
+
+    c.bench_function("stream_spilled_collector", |b| {
+        let mut collector = Collector::<[[u64; 32]; 4]>::new().unwrap();
+        for i in 0..25_000u64 {
+            collector.add([[i; 32]; 4], 1).unwrap();
+        }
+
+        b.iter(|| {
+            let mut sum = 0isize;
+            collector
+                .try_for_each(|entry| {
+                    sum += entry.count;
+                })
+                .unwrap();
+            std::hint::black_box(sum);
+        });
+    });
 }
 
 criterion_group!(benches, bench_write_to_collector);
