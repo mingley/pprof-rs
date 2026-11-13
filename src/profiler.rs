@@ -34,6 +34,10 @@ pub(crate) static PROFILER: Lazy<RwLock<Result<Profiler>>> =
 /// sampling interval. Reset to zero when the profiler starts.
 pub(crate) static MISSED_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
+/// Number of samples dropped because the configured spill cap (or spill I/O)
+/// was reached. Reset to zero when the profiler starts.
+pub(crate) static DROPPED_SPILL_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
 pub struct Profiler {
     pub(crate) data: Collector<UnresolvedFrames>,
     sample_counter: i32,
@@ -60,6 +64,7 @@ pub struct ProfilerGuardBuilder {
     frequency: c_int,
     clock_type: ClockType,
     thread_blocklist: Vec<Vec<u8>>,
+    max_spill_entries: Option<usize>,
 
     #[cfg(feature = "frame-pointer")]
     on_stack: bool,
@@ -79,6 +84,7 @@ impl Default for ProfilerGuardBuilder {
             frequency: 99,
             clock_type: ClockType::Cpu,
             thread_blocklist: Vec::new(),
+            max_spill_entries: None,
 
             #[cfg(feature = "frame-pointer")]
             on_stack: false,
@@ -120,6 +126,34 @@ impl ProfilerGuardBuilder {
             thread_blocklist,
             ..self
         }
+    }
+
+    /// Sets an upper bound (in bytes) on evicted sample entries spilled outside the in-memory table.
+    ///
+    /// When reached, evicted samples that cannot fit in the in-memory table are dropped cleanly
+    /// and counted via [`ProfilerGuard::dropped_spill_samples`] and [`Report::dropped_spill_samples`],
+    /// strictly bounding `/tmp` (`tmpfs`) usage. Passing `0` disables spilling completely.
+    pub fn max_spill_bytes(mut self, max_bytes: usize) -> Self {
+        let entry_size = std::mem::size_of::<crate::collector::Entry<UnresolvedFrames>>().max(1);
+        let max_entries = max_bytes / entry_size;
+        self.max_spill_entries = Some(match self.max_spill_entries {
+            Some(existing) => existing.min(max_entries),
+            None => max_entries,
+        });
+        self
+    }
+
+    /// Sets an upper bound on the number of evicted sample entries spilled outside the in-memory table.
+    ///
+    /// When reached, evicted samples that cannot fit in the in-memory table are dropped cleanly
+    /// and counted via [`ProfilerGuard::dropped_spill_samples`] and [`Report::dropped_spill_samples`].
+    /// Passing `0` disables spilling completely.
+    pub fn max_spill_entries(mut self, max_entries: usize) -> Self {
+        self.max_spill_entries = Some(match self.max_spill_entries {
+            Some(existing) => existing.min(max_entries),
+            None => max_entries,
+        });
+        self
     }
 
     #[cfg(feature = "frame-pointer")]
@@ -202,7 +236,11 @@ impl ProfilerGuardBuilder {
                     profiler.blocklist_segments = self.blocklist_segments;
                 }
 
-                match profiler.start(self.clock_type, self.thread_blocklist) {
+                match profiler.start(
+                    self.clock_type,
+                    self.thread_blocklist,
+                    self.max_spill_entries,
+                ) {
                     Ok(()) => Ok(ProfilerGuard::<'static> {
                         profiler: &PROFILER,
                         timer: Some(Timer::with_clock_type(self.frequency, self.clock_type)),
@@ -254,6 +292,11 @@ impl ProfilerGuard<'_> {
     /// Returns the number of samples dropped due to lock contention in the signal handler.
     pub fn missed_samples(&self) -> u64 {
         MISSED_SAMPLES.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of samples dropped because the configured spill cap (or spill I/O) was reached.
+    pub fn dropped_spill_samples(&self) -> u64 {
+        DROPPED_SPILL_SAMPLES.load(Ordering::Relaxed)
     }
 }
 
@@ -532,15 +575,22 @@ impl Profiler {
 }
 
 impl Profiler {
-    pub fn start(&mut self, clock_type: ClockType, thread_blocklist: Vec<Vec<u8>>) -> Result<()> {
+    pub fn start(
+        &mut self,
+        clock_type: ClockType,
+        thread_blocklist: Vec<Vec<u8>>,
+        max_spill_entries: Option<usize>,
+    ) -> Result<()> {
         log::info!("starting {:?} profiler", clock_type);
         if self.running {
             Err(Error::Running)
         } else {
             self.clock_type = clock_type;
             self.thread_blocklist = thread_blocklist;
+            self.data.configure_max_spill_entries(max_spill_entries)?;
             self.register_signal_handler()?;
             MISSED_SAMPLES.store(0, Ordering::Relaxed);
+            DROPPED_SPILL_SAMPLES.store(0, Ordering::Relaxed);
             self.running = true;
 
             Ok(())
@@ -551,6 +601,12 @@ impl Profiler {
     #[allow(dead_code)]
     pub fn missed_samples() -> u64 {
         MISSED_SAMPLES.load(Ordering::Relaxed)
+    }
+
+    /// Number of samples dropped because the configured spill cap (or spill I/O) was reached.
+    #[allow(dead_code)]
+    pub fn dropped_spill_samples() -> u64 {
+        DROPPED_SPILL_SAMPLES.load(Ordering::Relaxed)
     }
 
     fn init(&mut self) -> Result<()> {
@@ -628,69 +684,121 @@ impl Profiler {
         let frames = UnresolvedFrames::new(backtrace, thread_name, thread_id, sample_timestamp);
         self.sample_counter += 1;
 
-        if let Ok(()) = self.data.add(frames, 1) {}
+        let dropped_before = self.data.dropped_samples();
+        let _ = self.data.add(frames, 1);
+        let dropped_after = self.data.dropped_samples();
+        if dropped_after > dropped_before {
+            DROPPED_SPILL_SAMPLES.fetch_add(dropped_after - dropped_before, Ordering::Relaxed);
+        }
     }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize};
 
-    struct AllocDetector {
-        should_count_alloc: std::sync::atomic::AtomicBool,
-        alloc_count: std::sync::atomic::AtomicUsize,
+    pub(crate) static TEST_PROFILER_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct AllocDetector {
+        should_count_alloc: AtomicBool,
+        target_thread: AtomicUsize,
+        alloc_count: AtomicUsize,
+        track_bytes: AtomicBool,
+        current_bytes: AtomicIsize,
+        peak_bytes: AtomicIsize,
+        max_single_alloc_bytes: AtomicUsize,
     }
 
     unsafe impl std::alloc::GlobalAlloc for AllocDetector {
         unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-            if self
-                .should_count_alloc
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                self.alloc_count
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.should_count_alloc.load(Ordering::SeqCst) {
+                let tid = unsafe { libc::pthread_self() as usize };
+                if tid == self.target_thread.load(Ordering::SeqCst) {
+                    self.alloc_count.fetch_add(1, Ordering::SeqCst);
+                }
             }
 
-            unsafe { std::alloc::System.alloc(layout) }
+            let ptr = unsafe { std::alloc::System.alloc(layout) };
+            if !ptr.is_null() && self.track_bytes.load(Ordering::Relaxed) {
+                let tid = unsafe { libc::pthread_self() as usize };
+                if tid == self.target_thread.load(Ordering::Relaxed) {
+                    let size = layout.size();
+                    let delta = size as isize;
+                    let cur = self.current_bytes.fetch_add(delta, Ordering::Relaxed) + delta;
+                    self.peak_bytes.fetch_max(cur, Ordering::Relaxed);
+                    self.max_single_alloc_bytes
+                        .fetch_max(size, Ordering::Relaxed);
+                }
+            }
+            ptr
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            if self.track_bytes.load(Ordering::Relaxed) {
+                let tid = unsafe { libc::pthread_self() as usize };
+                if tid == self.target_thread.load(Ordering::Relaxed) {
+                    self.current_bytes
+                        .fetch_sub(layout.size() as isize, Ordering::Relaxed);
+                }
+            }
             unsafe { std::alloc::System.dealloc(ptr, layout) }
         }
     }
     impl AllocDetector {
         fn enable_count_alloc(&self) {
-            self.should_count_alloc
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let tid = unsafe { libc::pthread_self() as usize };
+            self.target_thread.store(tid, Ordering::SeqCst);
+            self.alloc_count.store(0, Ordering::SeqCst);
+            self.should_count_alloc.store(true, Ordering::SeqCst);
         }
 
         fn disable_count_alloc(&self) {
-            self.should_count_alloc
-                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.should_count_alloc.store(false, Ordering::SeqCst);
         }
 
         fn alloc_count(&self) -> usize {
-            self.alloc_count.load(std::sync::atomic::Ordering::SeqCst)
+            self.alloc_count.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn start_byte_tracking(&self) {
+            let tid = unsafe { libc::pthread_self() as usize };
+            self.target_thread.store(tid, Ordering::SeqCst);
+            self.current_bytes.store(0, Ordering::SeqCst);
+            self.peak_bytes.store(0, Ordering::SeqCst);
+            self.max_single_alloc_bytes.store(0, Ordering::SeqCst);
+            self.track_bytes.store(true, Ordering::SeqCst);
+        }
+
+        pub(crate) fn stop_byte_tracking(&self) -> (usize, usize) {
+            self.track_bytes.store(false, Ordering::SeqCst);
+            let peak = self.peak_bytes.load(Ordering::SeqCst).max(0) as usize;
+            (peak, self.max_single_alloc_bytes.load(Ordering::SeqCst))
         }
     }
 
     #[global_allocator]
-    static ALLOC: AllocDetector = AllocDetector {
-        should_count_alloc: std::sync::atomic::AtomicBool::new(false),
-        alloc_count: std::sync::atomic::AtomicUsize::new(0),
+    pub(crate) static ALLOC: AllocDetector = AllocDetector {
+        should_count_alloc: AtomicBool::new(false),
+        target_thread: AtomicUsize::new(0),
+        alloc_count: AtomicUsize::new(0),
+        track_bytes: AtomicBool::new(false),
+        current_bytes: AtomicIsize::new(0),
+        peak_bytes: AtomicIsize::new(0),
+        max_single_alloc_bytes: AtomicUsize::new(0),
     };
 
     #[test]
     fn test_no_alloc_during_unwind() {
-        // This test cannot run parallelly because it requires the global allocator to
-        // record the allocation count.
+        let _serial = TEST_PROFILER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         trigger_lazy();
         PROFILER
             .write()
             .as_mut()
             .unwrap()
-            .start(ClockType::Cpu, Vec::new())
+            .start(ClockType::Cpu, Vec::new(), None)
             .unwrap();
         let timer = Timer::new(999);
         let start = std::time::Instant::now();
@@ -712,6 +820,8 @@ pub mod tests {
 
     #[test]
     fn test_missed_samples_counter() {
+        let _serial = TEST_PROFILER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         trigger_lazy();
         MISSED_SAMPLES.store(42, Ordering::Relaxed);
         let guard = ProfilerGuard::new(100).unwrap();
@@ -727,6 +837,8 @@ pub mod tests {
 
     #[test]
     fn test_stray_sigprof_handling() {
+        let _serial = TEST_PROFILER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         trigger_lazy();
         {
             let _guard = ProfilerGuard::new(100).unwrap();
@@ -740,6 +852,8 @@ pub mod tests {
 
     #[test]
     fn test_wall_clock_profiling() {
+        let _serial = TEST_PROFILER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         trigger_lazy();
         let guard = ProfilerGuard::with_clock_type(100, ClockType::Wall).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -771,5 +885,72 @@ pub mod tests {
         assert!(profiler.is_thread_blocklisted(b"worker-1"));
         assert!(profiler.is_thread_blocklisted(b"tokio-runtime"));
         assert!(!profiler.is_thread_blocklisted(b"main"));
+    }
+
+    #[test]
+    fn test_profiler_guard_spill_cap_accounting() {
+        let _serial = TEST_PROFILER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        trigger_lazy();
+        let max_spill = 12usize;
+        let guard = ProfilerGuardBuilder::default()
+            .frequency(100)
+            .max_spill_entries(max_spill)
+            .build()
+            .unwrap();
+        // Disarm the OS interval timer so only deterministic synthetic samples are counted.
+        let _ = Timer::with_clock_type(1, ClockType::Cpu);
+        let total_injected: u64 =
+            (crate::collector::BUCKETS * crate::collector::BUCKETS_ASSOCIATIVITY + max_spill + 45)
+                as u64;
+
+        {
+            let mut lock = PROFILER.write();
+            let profiler = lock.as_mut().unwrap();
+            // Reset collector deterministically in case a timer tick arrived before disarming.
+            profiler
+                .data
+                .configure_max_spill_entries(Some(max_spill))
+                .unwrap();
+            DROPPED_SPILL_SAMPLES.store(0, Ordering::Relaxed);
+
+            for tid in 1..=total_injected {
+                profiler.sample(SmallVec::new(), b"cap-test", tid, SystemTime::UNIX_EPOCH);
+            }
+            assert!(profiler.data.spilled_entries() <= max_spill);
+        }
+
+        let dropped = guard.dropped_spill_samples();
+        assert!(
+            dropped >= 45,
+            "expected >= 45 dropped spill samples, got {dropped}"
+        );
+
+        let unresolved = guard.report().build_unresolved().unwrap();
+        assert_eq!(unresolved.dropped_spill_samples(), dropped);
+        assert_eq!(unresolved.total_samples() as u64 + dropped, total_injected);
+
+        let report = guard.report().build().unwrap();
+        assert_eq!(report.dropped_spill_samples(), dropped);
+        assert_eq!(report.total_samples() as u64 + dropped, total_injected);
+
+        #[cfg(feature = "_protobuf")]
+        {
+            let expected_comment = format!("dropped samples due to spill cap: {dropped}");
+            let p1 = report.pprof().unwrap();
+            let p2 = guard.report().build_pprof().unwrap();
+            let comments_1: Vec<&str> = p1
+                .comment
+                .iter()
+                .map(|&idx| p1.string_table[idx as usize].as_str())
+                .collect();
+            let comments_2: Vec<&str> = p2
+                .comment
+                .iter()
+                .map(|&idx| p2.string_table[idx as usize].as_str())
+                .collect();
+            assert!(comments_1.contains(&expected_comment.as_str()));
+            assert_eq!(comments_1, comments_2);
+        }
     }
 }

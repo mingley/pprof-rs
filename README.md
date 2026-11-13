@@ -16,7 +16,8 @@
 - **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
 - **Direct Folded Stack & Speedscope Export**: Native `report.write_folded(&mut writer)` and `report.write_speedscope(&mut writer, name)` methods for direct compatibility with [Speedscope](https://www.speedscope.app/) and Brendan Gregg scripts.
 - **One-Liner Profiling Helpers**: `rpprof::profile(duration)` and `rpprof::profile_wall(duration)` for effortless profiling in integration tests, CLI tools, and HTTP endpoints.
-- **Allocation-Free Iterator**: Optimized internal hash collector iteration to eliminate 4,095 heap allocations (`Box<dyn Iterator>`) and recursion on every report build.
+- **Allocation-Free Iterator & Bounded-Memory Report Building**: Streams temporary spill files in 256 KiB chunks, pre-aggregates raw stacks before symbolization, memoizes `PC -> Arc<[Symbol]>` per build, and supports direct `guard.report().build_pprof()` export without materializing an intermediate `Report`.
+- **Bounded `/tmp` Spill Storage**: Optional `ProfilerGuardBuilder::max_spill_bytes()` / `max_spill_entries()` caps temporary spill usage (including `0` for strictly in-memory capture) and tracks dropped spill samples via `guard.dropped_spill_samples()`.
 - **Thread Name Capture & Filtering**: Fixed macOS and musl thread name detection, and added `thread_blocklist` for async-signal-safe thread filtering by name.
 - **Missed Sample Observability**: Built-in atomic counter (`guard.missed_samples()` / `Profiler::missed_samples()`) tracking sampling ticks dropped due to lock contention in the signal handler. Missed sample counts are also embedded in generated pprof protobuf profiles.
 - **Stray SIGPROF Protection**: Sets `SIG_IGN` when unregistering the signal handler if the previous disposition was default, preventing trailing timer signals from aborting the process.
@@ -179,16 +180,15 @@ if let Ok(report) = guard.report().build() {
 
 ## Google `pprof` Protobuf Output
 
-With `prost-codec` enabled, `rpprof` outputs standard [`profile.proto`](https://github.com/google/pprof/blob/master/proto/profile.proto) protobuf profiles:
+With `prost-codec` enabled, `rpprof` outputs standard [`profile.proto`](https://github.com/google/pprof/blob/master/proto/profile.proto) protobuf profiles. Use `build_pprof()` to emit `protos::Profile` directly without allocating an intermediate `Report` (or `report.pprof()` if you also export other formats from the same `Report`):
 
 ```rust
 use std::fs::File;
 use std::io::Write;
 use rpprof::protos::Message;
 
-if let Ok(report) = guard.report().build() {
+if let Ok(profile) = guard.report().build_pprof() {
     let mut file = File::create("profile.pb").unwrap();
-    let profile = report.pprof().unwrap();
 
     let mut content = Vec::new();
     profile.encode(&mut content).unwrap();

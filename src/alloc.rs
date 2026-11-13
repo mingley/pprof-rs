@@ -350,6 +350,7 @@ impl HeapReport {
                 start_time: self.timestamp,
                 duration: std::time::Duration::from_secs(0),
                 clock_type: ClockType::Cpu,
+                dropped_spill_samples: 0,
             },
             missed_samples: 0,
         }
@@ -371,6 +372,7 @@ impl HeapReport {
                 start_time: self.timestamp,
                 duration: std::time::Duration::from_secs(0),
                 clock_type: ClockType::Cpu,
+                dropped_spill_samples: 0,
             },
             missed_samples: 0,
         }

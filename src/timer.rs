@@ -90,6 +90,7 @@ impl Timer {
             start_time: self.start_time,
             duration: self.start_instant.elapsed(),
             clock_type: self.clock_type,
+            dropped_spill_samples: 0,
         }
     }
 }
@@ -129,6 +130,8 @@ pub struct ReportTiming {
     pub duration: Duration,
     /// Clock type used for profiling.
     pub clock_type: ClockType,
+    /// Samples dropped because the spill cap (or spill I/O) was reached.
+    pub(crate) dropped_spill_samples: u64,
 }
 
 impl Default for ReportTiming {
@@ -138,6 +141,7 @@ impl Default for ReportTiming {
             start_time: SystemTime::UNIX_EPOCH,
             duration: Default::default(),
             clock_type: ClockType::Cpu,
+            dropped_spill_samples: 0,
         }
     }
 }

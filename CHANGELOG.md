@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.4] - 2026-11-12
+
+### Added
+- Added `ReportBuilder::build_pprof()` (`#[cfg(feature = "_protobuf")]`) to stream and merge `UnresolvedFrames` counts and intern `PC -> Location` / `Function` / `string_table` entries directly into `protos::Profile` without materializing an intermediate `Report`.
+- Added `ProfilerGuardBuilder::max_spill_bytes()` and `ProfilerGuardBuilder::max_spill_entries()` to strictly bound temporary spill storage (`/tmp` / `tmpfs`), with dropped-sample accounting via `ProfilerGuard::dropped_spill_samples()`, `Report::dropped_spill_samples()`, `UnresolvedReport::dropped_spill_samples()`, and `Collector::dropped_samples()`.
+- Added `Collector::try_for_each()`, `Collector::with_max_spill_bytes()`, and `Collector::with_max_spill_entries()`.
+
+### Fixed
+- Replaced the contiguous whole-file allocation in `TempFdArray::try_iter()` with a bounded 256 KiB streaming chunk iterator, preventing multi-hundred-MB heap spikes during long-running captures.
+- Pre-aggregated raw `UnresolvedFrames` counts before symbolization and memoized `PC -> Arc<[Symbol]>` per report build so each unique instruction pointer is symbolized at most once.
+- Deduplicated pprof protobuf `Function` and `Location` entries by `(name, system_name, filename)` and `(function_id, line)` while streaming string table interning without an intermediate `HashSet<String>`.
+
 ## [0.18.3] - 2026-10-13
 
 ### Changed

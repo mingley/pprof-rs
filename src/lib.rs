@@ -138,6 +138,9 @@ pub mod protos {
     ));
 }
 
+#[cfg(all(feature = "prost-codec", feature = "protobuf-codec"))]
+use prost as _;
+
 #[cfg(feature = "protobuf-codec")]
 pub mod protos {
     pub use protobuf::Message;
@@ -195,6 +198,10 @@ mod top_level_tests {
 
     #[test]
     fn test_top_level_profile_helpers() {
+        let _serial = crate::profiler::tests::TEST_PROFILER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
         let report = profile(Duration::from_millis(50)).unwrap();
         assert_eq!(report.clock_type(), ClockType::Cpu);
 
