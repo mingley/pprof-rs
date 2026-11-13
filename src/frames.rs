@@ -98,7 +98,7 @@ impl PartialEq for UnresolvedFrames {
             false
         } else {
             Iterator::zip(frames1.iter(), frames2.iter())
-                .all(|(s1, s2)| s1.symbol_address() == s2.symbol_address())
+                .all(|(s1, s2)| Frame::ip(s1) == Frame::ip(s2))
         }
     }
 }
@@ -109,7 +109,7 @@ impl Hash for UnresolvedFrames {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.frames
             .iter()
-            .for_each(|frame| frame.symbol_address().hash(state));
+            .for_each(|frame| Frame::ip(frame).hash(state));
         self.thread_id.hash(state);
     }
 }

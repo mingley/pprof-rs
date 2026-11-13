@@ -5,27 +5,41 @@ use std::fmt::{Debug, Formatter};
 
 use spin::RwLock;
 
-use crate::collector::Collector;
+use crate::collector::{Collector, Entry, ShardedCollector};
 use crate::frames::{Frames, SymbolCache, UnresolvedFrames};
 use crate::profiler::Profiler;
 use crate::timer::ReportTiming;
 
 use crate::{Error, Result};
 
+fn merge_unresolved_entry(
+    hash_map: &mut HashMap<UnresolvedFrames, isize>,
+    entry: &Entry<UnresolvedFrames>,
+) {
+    let count = entry.count;
+    if count > 0 {
+        if let Some(value) = hash_map.get_mut(&entry.item) {
+            *value += count;
+        } else {
+            hash_map.insert(entry.item.clone(), count);
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn collect_unresolved_counts(
     collector: &Collector<UnresolvedFrames>,
 ) -> Result<HashMap<UnresolvedFrames, isize>> {
     let mut hash_map = HashMap::new();
-    collector.try_for_each(|entry| {
-        let count = entry.count;
-        if count > 0 {
-            if let Some(value) = hash_map.get_mut(&entry.item) {
-                *value += count;
-            } else {
-                hash_map.insert(entry.item.clone(), count);
-            }
-        }
-    })?;
+    collector.try_for_each(|entry| merge_unresolved_entry(&mut hash_map, entry))?;
+    Ok(hash_map)
+}
+
+pub(crate) fn collect_sharded_unresolved_counts(
+    collector: &ShardedCollector<UnresolvedFrames>,
+) -> Result<HashMap<UnresolvedFrames, isize>> {
+    let mut hash_map = HashMap::new();
+    collector.try_for_each(|entry| merge_unresolved_entry(&mut hash_map, entry))?;
     Ok(hash_map)
 }
 
@@ -85,13 +99,13 @@ impl<'a> ReportBuilder<'a> {
 
     /// Build an `UnresolvedReport`
     pub fn build_unresolved(&self) -> Result<UnresolvedReport> {
-        match self.profiler.read().as_ref() {
+        match self.profiler.write().as_ref() {
             Err(err) => {
                 log::error!("Error in creating profiler: {}", err);
                 Err(Error::CreatingError)
             }
             Ok(profiler) => {
-                let hash_map = collect_unresolved_counts(&profiler.data)?;
+                let hash_map = collect_sharded_unresolved_counts(&profiler.data)?;
                 let mut timing = self.timing.clone();
                 timing.dropped_spill_samples = profiler.data.dropped_samples();
 
@@ -113,7 +127,7 @@ impl<'a> ReportBuilder<'a> {
                 Err(Error::CreatingError)
             }
             Ok(profiler) => {
-                let unresolved_map = collect_unresolved_counts(&profiler.data)?;
+                let unresolved_map = collect_sharded_unresolved_counts(&profiler.data)?;
                 let dropped_spill = profiler.data.dropped_samples();
                 let mut symbol_cache = SymbolCache::default();
                 let mut hash_map = HashMap::with_capacity(unresolved_map.len());
@@ -207,6 +221,7 @@ mod flamegraph {
             let lines: Vec<String> = self
                 .data
                 .iter()
+                .filter(|&(_, &value)| value > 0)
                 .map(|(key, value)| {
                     let mut line = key.thread_name_or_id();
                     line.push(';');
@@ -224,8 +239,8 @@ mod flamegraph {
                 })
                 .collect();
             if !lines.is_empty() {
-                flamegraph::from_lines(options, lines.iter().map(|s| &**s), writer).unwrap();
-                // TODO: handle this error
+                flamegraph::from_lines(options, lines.iter().map(|s| &**s), writer)
+                    .map_err(|err| Error::IoError(std::io::Error::other(err)))?;
             }
 
             Ok(())
@@ -501,7 +516,7 @@ pub(crate) mod protobuf {
                     Err(Error::CreatingError)
                 }
                 Ok(profiler) => {
-                    let unresolved_map = collect_unresolved_counts(&profiler.data)?;
+                    let unresolved_map = collect_sharded_unresolved_counts(&profiler.data)?;
                     let mut timing = self.timing.clone();
                     timing.dropped_spill_samples = profiler.data.dropped_samples();
                     let missed_samples =
@@ -515,6 +530,230 @@ pub(crate) mod protobuf {
                     ))
                 }
             }
+        }
+    }
+
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos"),
+        feature = "framehop-unwinder"
+    ))]
+    fn read_build_id_hex(path: &std::path::Path, is_first: bool) -> Option<String> {
+        use object::Object;
+        use std::fmt::Write;
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            #[cfg(target_os = "linux")]
+            Err(_) if is_first => std::fs::File::open("/proc/self/exe").ok()?,
+            Err(_) => {
+                let _ = is_first;
+                return None;
+            }
+        };
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+        let obj = object::File::parse(&*mmap).ok()?;
+        let uuid_buf;
+        let bytes: &[u8] = if let Ok(Some(bid)) = obj.build_id() {
+            bid
+        } else if let Ok(Some(uuid)) = obj.mach_uuid() {
+            uuid_buf = uuid;
+            uuid_buf.as_slice()
+        } else {
+            return None;
+        };
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            let _ = write!(&mut hex, "{b:02x}");
+        }
+        Some(hex)
+    }
+
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos"),
+        feature = "framehop-unwinder"
+    )))]
+    fn read_build_id_hex(_path: &std::path::Path, _is_first: bool) -> Option<String> {
+        None
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    ))]
+    fn collect_process_mappings(strings: &mut StringTable) -> Vec<protos::Mapping> {
+        use findshlibs::{SharedLibrary, TargetSharedLibrary};
+        use std::path::PathBuf;
+
+        let mut mappings = Vec::new();
+        let mut is_first = true;
+        TargetSharedLibrary::each(|shlib| {
+            let first = is_first;
+            is_first = false;
+            let len = shlib.len() as u64;
+            if len == 0 {
+                return;
+            }
+            let start = shlib.actual_load_addr().0 as u64;
+            let limit = start.saturating_add(len);
+            let path = PathBuf::from(shlib.name());
+            let filename_idx = strings.intern(&path.to_string_lossy());
+            let build_id_idx = read_build_id_hex(&path, first)
+                .map(|bid| strings.intern(&bid))
+                .unwrap_or(0);
+            let id = mappings.len() as u64 + 1;
+            mappings.push(protos::Mapping {
+                id,
+                memory_start: start,
+                memory_limit: limit,
+                filename: filename_idx,
+                build_id: build_id_idx,
+                ..protos::Mapping::default()
+            });
+        });
+        mappings
+    }
+
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    )))]
+    fn collect_process_mappings(_strings: &mut StringTable) -> Vec<protos::Mapping> {
+        Vec::new()
+    }
+
+    impl UnresolvedReport {
+        /// Generates an unsymbolized Google `pprof` protobuf profile containing raw
+        /// instruction addresses, loaded binary [`protos::Mapping`] ranges, and build IDs
+        /// (when available) for zero-symbolization-overhead capture and offline symbolication.
+        pub fn pprof(&self) -> crate::Result<protos::Profile> {
+            let mut strings = StringTable::new();
+            let thread_key_idx = strings.intern(THREAD);
+            let mappings = collect_process_mappings(&mut strings);
+
+            let mut sorted_ranges: Vec<(u64, u64, u64)> = mappings
+                .iter()
+                .map(|m| (m.memory_start, m.memory_limit, m.id))
+                .collect();
+            sorted_ranges.sort_unstable_by_key(|&(start, _, _)| start);
+
+            let find_mapping = |addr: u64| -> u64 {
+                let idx = sorted_ranges.partition_point(|&(start, _, _)| start <= addr);
+                for &(start, limit, id) in sorted_ranges[..idx].iter().rev() {
+                    if start <= addr && addr < limit {
+                        return id;
+                    }
+                    if limit <= addr {
+                        break;
+                    }
+                }
+                0
+            };
+
+            let mut loc_tbl: Vec<protos::Location> = Vec::new();
+            let mut pc_to_loc: HashMap<u64, u64> = HashMap::new();
+            let mut sample_counts: HashMap<(Vec<u64>, i64), i64> =
+                HashMap::with_capacity(self.data.len());
+
+            for (unresolved, &count) in &self.data {
+                if count <= 0 {
+                    continue;
+                }
+                let mut locs = Vec::with_capacity(unresolved.frames.len());
+                for frame in &unresolved.frames {
+                    let addr = BacktraceFrame::ip(frame) as u64;
+                    let loc_id = if let Some(&id) = pc_to_loc.get(&addr) {
+                        id
+                    } else {
+                        let id = loc_tbl.len() as u64 + 1;
+                        let mapping_id = find_mapping(addr);
+                        loc_tbl.push(protos::Location {
+                            id,
+                            mapping_id,
+                            address: addr,
+                            ..protos::Location::default()
+                        });
+                        pc_to_loc.insert(addr, id);
+                        id
+                    };
+                    locs.push(loc_id);
+                }
+                let thread_name = unresolved.thread_name_or_id();
+                let thread_str_idx = strings.intern(&thread_name);
+                *sample_counts.entry((locs, thread_str_idx)).or_insert(0) += count as i64;
+            }
+
+            let samples_ty_idx = strings.intern(SAMPLES);
+            let count_unit_idx = strings.intern(COUNT);
+            let cpu_ty_idx = strings.intern(CPU);
+            let nanos_unit_idx = strings.intern(NANOSECONDS);
+
+            let missed_comment = format!(
+                "missed samples due to lock contention: {}",
+                self.missed_samples
+            );
+            let mut comments = vec![strings.intern(&missed_comment)];
+            if self.timing.dropped_spill_samples > 0 {
+                let dropped_comment = format!(
+                    "dropped samples due to spill cap: {}",
+                    self.timing.dropped_spill_samples
+                );
+                comments.push(strings.intern(&dropped_comment));
+            }
+
+            let freq = i64::from(self.timing.frequency).max(1);
+            let mut samples = Vec::with_capacity(sample_counts.len());
+            for ((locs, thread_str_idx), count) in sample_counts {
+                let thread_label = protos::Label {
+                    key: thread_key_idx,
+                    str: thread_str_idx,
+                    ..protos::Label::default()
+                };
+                samples.push(protos::Sample {
+                    location_id: locs,
+                    value: vec![count, count * 1_000_000_000 / freq],
+                    label: vec![thread_label].into(),
+                    ..Default::default()
+                });
+            }
+
+            let samples_value = protos::ValueType {
+                ty: samples_ty_idx,
+                unit: count_unit_idx,
+                ..Default::default()
+            };
+            let time_value = protos::ValueType {
+                ty: cpu_ty_idx,
+                unit: nanos_unit_idx,
+                ..Default::default()
+            };
+
+            Ok(protos::Profile {
+                sample_type: vec![samples_value, time_value.clone()].into(),
+                sample: samples.into(),
+                mapping: mappings.into(),
+                location: loc_tbl.into(),
+                string_table: strings.table.into(),
+                time_nanos: self
+                    .timing
+                    .start_time
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as i64,
+                duration_nanos: self.timing.duration.as_nanos() as i64,
+                period_type: Some(time_value).into(),
+                period: 1_000_000_000 / freq,
+                comment: comments.into(),
+                ..protos::Profile::default()
+            })
         }
     }
 
@@ -688,6 +927,18 @@ mod protobuf_tests {
             normalize_profile(&proc_via_report),
             normalize_profile(&proc_via_direct)
         );
+
+        let unresolved_rep = guard.report().build_unresolved().unwrap();
+        let unresolved_pb = unresolved_rep.pprof().unwrap();
+        assert!(!unresolved_pb.mapping.is_empty());
+        assert!(
+            unresolved_pb
+                .location
+                .iter()
+                .all(|loc| loc.address != 0 && loc.line.is_empty())
+        );
+        assert!(unresolved_pb.location.iter().any(|loc| loc.mapping_id != 0));
+        assert!(!encode_roundtrip_bytes(&unresolved_pb).is_empty());
     }
 
     #[cfg(any(feature = "framehop-unwinder", feature = "frame-pointer"))]

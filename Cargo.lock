@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "rpprof"
-version = "0.16.3"
+version = "0.16.4"
 dependencies = [
  "aligned-vec",
  "arc-swap",

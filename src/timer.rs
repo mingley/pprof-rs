@@ -32,10 +32,11 @@ pub struct Timer {
 
 impl Timer {
     pub fn new(frequency: c_int) -> Timer {
-        let interval = 1e6 as i64 / i64::from(frequency);
+        let frequency = frequency.clamp(1, 1_000_000);
+        let interval = 1_000_000i64 / i64::from(frequency);
         let it_interval = Timeval {
-            tv_sec: interval / 1e6 as i64,
-            tv_usec: interval % 1e6 as i64,
+            tv_sec: interval / 1_000_000,
+            tv_usec: interval % 1_000_000,
         };
         let it_value = it_interval.clone();
 
@@ -110,5 +111,29 @@ impl Default for ReportTiming {
             duration: Default::default(),
             dropped_spill_samples: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timer_clamps_invalid_and_extreme_frequencies() {
+        let _serial = crate::profiler::tests::TEST_PROFILER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let zero_timer = Timer::new(0);
+        assert_eq!(zero_timer.frequency, 1);
+        drop(zero_timer);
+
+        let neg_timer = Timer::new(-100);
+        assert_eq!(neg_timer.frequency, 1);
+        drop(neg_timer);
+
+        let huge_timer = Timer::new(5_000_000);
+        assert_eq!(huge_timer.frequency, 1_000_000);
+        drop(huge_timer);
     }
 }
