@@ -670,6 +670,9 @@ pub(crate) mod protobuf {
                 let mut locs = Vec::with_capacity(unresolved.frames.len());
                 for frame in &unresolved.frames {
                     let addr = BacktraceFrame::ip(frame) as u64;
+                    if addr == 0 {
+                        continue;
+                    }
                     let loc_id = if let Some(&id) = pc_to_loc.get(&addr) {
                         id
                     } else {
