@@ -11,7 +11,8 @@
 ## Key Changes and Improvements
 
 - **Dependency and Security Updates**: Refreshed dependency trees to resolve security advisories flagged by `cargo-deny` (including `memmap2`, `quick-xml`, `anyhow`, `bytes`, `rand`, `adler`, and `crossbeam-epoch`).
-- **Zero-Configuration Unwinding**: `framehop-unwinder` is enabled by default. Uses pre-parsed DWARF unwind tables for fast, allocation-free, async-signal-safe stack unwinding—**no `-Cforce-frame-pointers=yes` or special release build flags required**.
+- **Zero-Configuration Unwinding**: `framehop-unwinder` is enabled by default. Uses zero-copy `mmap`-backed DWARF unwind tables and a 64-slot concurrent unwind cache for fast, allocation-free, async-signal-safe stack unwinding—**no `-Cforce-frame-pointers=yes` or special release build flags required**.
+- **Sharded Concurrent Signal Collector**: Unwinds concurrently across CPU cores under a shared read lock with a 16-shard collector and per-unwind page-cached stack validation, minimizing dropped ticks on high-core-count servers.
 - **Sampled Heap / Memory Profiling**: Built-in `rpprof::alloc::AllocProfiler` (`GlobalAlloc` wrapper) with Poisson-sampled allocation tracking (512 KiB default rate), capturing both live in-use memory and cumulative allocation flamegraphs with <1% overhead.
 - **CPU & Wall-Clock Profiling**: Added `ClockType` supporting both on-CPU profiling (`ITIMER_PROF` / `SIGPROF`) and real Wall-clock profiling (`ITIMER_REAL` / `SIGALRM`) for off-CPU / I/O latency bottlenecks.
 - **Direct Folded Stack & Speedscope Export**: Native `report.write_folded(&mut writer)` and `report.write_speedscope(&mut writer, name)` methods for direct compatibility with [Speedscope](https://www.speedscope.app/) and Brendan Gregg scripts.

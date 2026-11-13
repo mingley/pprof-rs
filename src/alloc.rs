@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::SystemTime;
 
 use crate::Result;
-use crate::frames::{Frames, Symbol};
+use crate::frames::{Frames, Symbol, SymbolCache};
 use crate::report::Report;
 use crate::timer::{ClockType, ReportTiming};
 
@@ -74,6 +74,7 @@ impl HeapState {
             callsites.clear();
         }
         self.next_callsite_id.store(1, Ordering::SeqCst);
+        let _ = BYTES_LEFT.try_with(|bytes_left| bytes_left.set(0));
     }
 }
 
@@ -86,6 +87,36 @@ fn state() -> &'static HeapState {
 thread_local! {
     static IN_ALLOC: Cell<bool> = const { Cell::new(false) };
     static BYTES_LEFT: Cell<isize> = const { Cell::new(0) };
+    static RNG_STATE: Cell<u64> = const { Cell::new(0) };
+}
+
+fn next_poisson_interval(rate: usize) -> isize {
+    if rate <= 1 {
+        return 1;
+    }
+    let u = RNG_STATE
+        .try_with(|state| {
+            let mut x = state.get();
+            if x == 0 {
+                x = (state as *const Cell<u64> as usize as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    | 1;
+            }
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            state.set(x);
+            let rand64 = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            ((rand64 >> 11) as f64 + 1.0) * (1.0 / ((1u64 << 53) as f64 + 1.0))
+        })
+        .unwrap_or(0.5);
+    let sample = -(rate as f64) * u.ln();
+    if !sample.is_finite() || sample < 1.0 {
+        1
+    } else if sample > (isize::MAX / 2) as f64 {
+        isize::MAX / 2
+    } else {
+        sample as isize
+    }
 }
 
 /// A sampling heap profiler wrapping any `GlobalAlloc` implementation.
@@ -161,7 +192,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for AllocProfiler<A> {
                 if remaining <= 0 {
                     in_alloc.set(true);
                     let rate = SAMPLE_RATE.load(Ordering::Relaxed);
-                    bytes_left.set(rate as isize);
+                    bytes_left.set(next_poisson_interval(rate));
 
                     record_sample(ptr as usize, size);
                     in_alloc.set(false);
@@ -385,7 +416,6 @@ impl HeapReport {
 mod protobuf {
     use super::*;
     use crate::protos;
-    use std::collections::HashSet;
 
     const ALLOC_OBJECTS: &str = "alloc_objects";
     const ALLOC_SPACE: &str = "alloc_space";
@@ -399,72 +429,75 @@ mod protobuf {
         /// Generates a standard Google pprof protobuf profile with heap sample types
         /// (alloc_objects, alloc_space, inuse_objects, inuse_space).
         pub fn pprof(&self) -> Result<protos::Profile> {
-            let mut dedup_str = HashSet::new();
-            for rec in &self.records {
-                dedup_str.insert(rec.frames.thread_name_or_id());
-                for frame in &rec.frames.frames {
-                    for symbol in frame {
-                        dedup_str.insert(symbol.name());
-                        dedup_str.insert(symbol.sys_name().into_owned());
-                        dedup_str.insert(symbol.filename().into_owned());
-                    }
+            let mut str_tbl = vec![String::new()];
+            let mut str_index: HashMap<String, i64> = HashMap::new();
+            str_index.insert(String::new(), 0);
+
+            let mut intern = |s: &str| -> i64 {
+                if let Some(&id) = str_index.get(s) {
+                    return id;
                 }
-            }
-            dedup_str.insert(ALLOC_OBJECTS.into());
-            dedup_str.insert(ALLOC_SPACE.into());
-            dedup_str.insert(INUSE_OBJECTS.into());
-            dedup_str.insert(INUSE_SPACE.into());
-            dedup_str.insert(COUNT.into());
-            dedup_str.insert(BYTES.into());
-            dedup_str.insert(SPACE.into());
+                let id = str_tbl.len() as i64;
+                let owned = s.to_owned();
+                str_tbl.push(owned.clone());
+                str_index.insert(owned, id);
+                id
+            };
 
-            let mut str_tbl = vec!["".to_owned()];
-            str_tbl.extend(dedup_str);
-
-            let mut strings = HashMap::new();
-            for (index, name) in str_tbl.iter().enumerate() {
-                strings.insert(name.as_str(), index);
-            }
-
-            let mut samples = vec![];
-            let mut loc_tbl = vec![];
-            let mut fn_tbl = vec![];
-            let mut functions = HashMap::new();
+            let mut samples = Vec::with_capacity(self.records.len());
+            let mut loc_tbl = Vec::new();
+            let mut fn_tbl = Vec::new();
+            let mut functions: HashMap<(i64, i64, i64), u64> = HashMap::new();
+            let mut locations: HashMap<(u64, u32), u64> = HashMap::new();
 
             for rec in &self.records {
-                let mut locs = vec![];
+                let mut locs = Vec::with_capacity(rec.frames.frames.len());
                 for frame in &rec.frames.frames {
                     for symbol in frame {
                         let name = symbol.name();
-                        if let Some(loc_idx) = functions.get(&name) {
-                            locs.push(*loc_idx);
-                            continue;
-                        }
                         let sys_name = symbol.sys_name();
                         let filename = symbol.filename();
                         let lineno = symbol.lineno();
-                        let function_id = fn_tbl.len() as u64 + 1;
-                        let function = protos::Function {
-                            id: function_id,
-                            name: *strings.get(name.as_str()).unwrap() as i64,
-                            system_name: *strings.get(sys_name.as_ref()).unwrap() as i64,
-                            filename: *strings.get(filename.as_ref()).unwrap() as i64,
-                            ..protos::Function::default()
+
+                        let name_idx = intern(&name);
+                        let sys_idx = intern(sys_name.as_ref());
+                        let file_idx = intern(filename.as_ref());
+
+                        let fn_key = (name_idx, sys_idx, file_idx);
+                        let function_id = if let Some(&id) = functions.get(&fn_key) {
+                            id
+                        } else {
+                            let id = fn_tbl.len() as u64 + 1;
+                            fn_tbl.push(protos::Function {
+                                id,
+                                name: name_idx,
+                                system_name: sys_idx,
+                                filename: file_idx,
+                                ..protos::Function::default()
+                            });
+                            functions.insert(fn_key, id);
+                            id
                         };
-                        functions.insert(name, function_id);
-                        let line = protos::Line {
-                            function_id,
-                            line: lineno as i64,
-                            ..protos::Line::default()
+
+                        let loc_key = (function_id, lineno);
+                        let loc_id = if let Some(&id) = locations.get(&loc_key) {
+                            id
+                        } else {
+                            let id = loc_tbl.len() as u64 + 1;
+                            let line = protos::Line {
+                                function_id,
+                                line: lineno as i64,
+                                ..protos::Line::default()
+                            };
+                            loc_tbl.push(protos::Location {
+                                id,
+                                line: vec![line].into(),
+                                ..protos::Location::default()
+                            });
+                            locations.insert(loc_key, id);
+                            id
                         };
-                        let loc = protos::Location {
-                            id: function_id,
-                            line: vec![line].into(),
-                            ..protos::Location::default()
-                        };
-                        fn_tbl.push(function);
-                        loc_tbl.push(loc);
-                        locs.push(function_id);
+                        locs.push(loc_id);
                     }
                 }
 
@@ -481,32 +514,40 @@ mod protobuf {
                 samples.push(sample);
             }
 
+            let alloc_obj_idx = intern(ALLOC_OBJECTS);
+            let alloc_space_idx = intern(ALLOC_SPACE);
+            let inuse_obj_idx = intern(INUSE_OBJECTS);
+            let inuse_space_idx = intern(INUSE_SPACE);
+            let count_idx = intern(COUNT);
+            let bytes_idx = intern(BYTES);
+            let space_idx = intern(SPACE);
+
             let sample_types = vec![
                 protos::ValueType {
-                    ty: *strings.get(ALLOC_OBJECTS).unwrap() as i64,
-                    unit: *strings.get(COUNT).unwrap() as i64,
+                    ty: alloc_obj_idx,
+                    unit: count_idx,
                     ..Default::default()
                 },
                 protos::ValueType {
-                    ty: *strings.get(ALLOC_SPACE).unwrap() as i64,
-                    unit: *strings.get(BYTES).unwrap() as i64,
+                    ty: alloc_space_idx,
+                    unit: bytes_idx,
                     ..Default::default()
                 },
                 protos::ValueType {
-                    ty: *strings.get(INUSE_OBJECTS).unwrap() as i64,
-                    unit: *strings.get(COUNT).unwrap() as i64,
+                    ty: inuse_obj_idx,
+                    unit: count_idx,
                     ..Default::default()
                 },
                 protos::ValueType {
-                    ty: *strings.get(INUSE_SPACE).unwrap() as i64,
-                    unit: *strings.get(BYTES).unwrap() as i64,
+                    ty: inuse_space_idx,
+                    unit: bytes_idx,
                     ..Default::default()
                 },
             ];
 
             let period_type = protos::ValueType {
-                ty: *strings.get(SPACE).unwrap() as i64,
-                unit: *strings.get(BYTES).unwrap() as i64,
+                ty: space_idx,
+                unit: bytes_idx,
                 ..Default::default()
             };
 
@@ -536,23 +577,25 @@ pub fn heap_report() -> Result<HeapReport> {
     let s = state();
     let data_read = s.callsites.read().unwrap();
     let mut records = Vec::with_capacity(data_read.len());
+    let mut symbol_cache = SymbolCache::default();
 
     for data in data_read.values() {
-        let mut frames_vec = Vec::new();
+        let mut frames_vec = Vec::with_capacity(data.ips.len());
 
         for &ip in &data.ips {
-            let mut symbols = Vec::new();
-            backtrace::resolve(ip as *mut _, |sym| {
-                symbols.push(Symbol {
-                    name: sym.name().map(|n| n.as_bytes().to_vec()),
-                    addr: sym.addr(),
-                    lineno: sym.lineno(),
-                    filename: sym.filename().map(|f| f.to_path_buf()),
+            let cached = symbol_cache.resolve_ip_with(ip, |pc, out| {
+                backtrace::resolve(pc as *mut _, |sym| {
+                    out.push(Symbol {
+                        name: sym.name().map(|n| n.as_bytes().to_vec()),
+                        addr: sym.addr(),
+                        lineno: sym.lineno(),
+                        filename: sym.filename().map(|f| f.to_path_buf()),
+                    });
                 });
             });
 
-            if !symbols.is_empty() {
-                frames_vec.push(symbols);
+            if !cached.symbols.is_empty() {
+                frames_vec.push(cached.symbols.as_ref().to_vec());
             }
         }
 

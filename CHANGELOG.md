@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.5] - 2026-11-12
+
+### Added
+- Added `UnresolvedReport::pprof()` (`#[cfg(feature = "_protobuf")]`) to export zero-symbolization-overhead pprof protobuf profiles populated with raw instruction addresses, process `Mapping` ranges, and ELF/Mach-O build IDs for offline symbolication on stripped production binaries.
+
+### Changed
+- Replaced the global exclusive signal-handler write lock during unwinding with a shared read lock, a 16-shard concurrent sample collector, and a 64-slot `framehop` unwind cache pool so multi-core workloads unwind and record samples concurrently without single-lock contention or heap re-allocation on stop.
+- Backed `framehop` unwind modules with zero-copy `Arc<Mmap>` slices instead of copying `.eh_frame` / `__unwind_info` sections into heap `Vec<u8>`s, eliminating tens of MiBs of permanent RSS on large binaries (with `/proc/self/exe` fallback on Linux).
+- Hashed and compared `UnresolvedFrames` by raw instruction pointer (`Frame::ip`) instead of calling `_Unwind_FindEnclosingFunction` on every frame inside `SIGPROF`.
+- Added per-unwind 4 KiB stack page validation caching and lazy `EAGAIN` pipe draining in `addr_validate`, cutting signal-handler validation syscalls by ~100x.
+- Switched `AllocProfiler` to true exponential (`-rate * ln(U)`) Poisson sampling, added `SymbolCache` memoization to `heap_report()`, and removed intermediate `HashSet<String>` / function-name collision bugs in `HeapReport::pprof()`.
+
+### Fixed
+- Emitted `"wall"` / `"nanoseconds"` `sample_type` and `period_type` in pprof protobufs for `ClockType::Wall` profiles instead of `"cpu"`.
+- Changed `Report::write_speedscope()` sample unit from `"count"` to schema-valid `"none"`.
+- Propagated `inferno` errors from `Report::flamegraph_with_options()` instead of panicking on `.unwrap()`.
+- Clamped invalid (`<= 0`) or excessive (`> 1_000_000`) frequencies in `Timer` to prevent division-by-zero panics or silent zero-interval disarming, and bounded `ProfilerGuard::drop` lock waits with a fallback `SIG_IGN` safeguard.
+- Fixed `perfmaps` truncating `/tmp/perf-<pid>.map` on initialization, spawning an OS thread per frame lookup, and scanning linearly instead of binary-searching sorted symbol ranges.
+
 ## [0.18.4] - 2026-11-12
 
 ### Added

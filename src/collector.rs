@@ -5,14 +5,18 @@ use std::convert::TryInto;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::frames::UnresolvedFrames;
 
 use aligned_vec::AVec;
+use spin::Mutex;
 use tempfile::NamedTempFile;
 
 pub const BUCKETS: usize = 1 << 12;
 pub const BUCKETS_ASSOCIATIVITY: usize = 4;
+pub(crate) const NUM_SHARDS: usize = 16;
+pub(crate) const BUCKETS_PER_SHARD: usize = BUCKETS / NUM_SHARDS;
 const RAW_BUFFER_LENGTH: usize = (1 << 18) / std::mem::size_of::<Entry<UnresolvedFrames>>();
 pub const BUFFER_LENGTH: usize = if RAW_BUFFER_LENGTH == 0 {
     1
@@ -441,14 +445,6 @@ impl<T: Hash + Eq + Default + Debug + 'static> Collector<T> {
 }
 
 impl<T: Hash + Eq + 'static> Collector<T> {
-    pub(crate) fn configure_max_spill_entries(
-        &mut self,
-        max_spill_entries: Option<usize>,
-    ) -> std::io::Result<()> {
-        self.dropped_samples = 0;
-        self.temp_array.set_max_entries(max_spill_entries)
-    }
-
     /// Returns the number of samples dropped because the spill cap (or spill I/O) was reached.
     pub fn dropped_samples(&self) -> u64 {
         self.dropped_samples
@@ -519,6 +515,155 @@ impl<T: Hash + Eq + 'static> Collector<T> {
             file_vec,
             index: 0,
         }))
+    }
+}
+
+pub(crate) enum ConcurrentAddOutcome {
+    Recorded,
+    DroppedSpill(u64),
+    Contended(u64),
+}
+
+/// 16-shard concurrent collector used by the signal-handler profiler so
+/// multiple CPU cores can unwind and record samples concurrently under a
+/// shared read lock without contending on a single global table lock.
+pub(crate) struct ShardedCollector<T: Hash + Eq + 'static> {
+    shards: [Mutex<Box<[Bucket<T>; BUCKETS_PER_SHARD]>>; NUM_SHARDS],
+    spill: Mutex<TempFdArray<Entry<T>>>,
+    spill_full: AtomicBool,
+    dropped_samples: AtomicU64,
+}
+
+impl<T: Hash + Eq + Default + Debug + 'static> ShardedCollector<T> {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        let shards = std::array::from_fn(|_| {
+            let mut v: Vec<Bucket<T>> = Vec::with_capacity(BUCKETS_PER_SHARD);
+            v.resize_with(BUCKETS_PER_SHARD, Default::default);
+            let boxed: Box<[Bucket<T>; BUCKETS_PER_SHARD]> =
+                v.into_boxed_slice().try_into().unwrap();
+            Mutex::new(boxed)
+        });
+        Ok(Self {
+            shards,
+            spill: Mutex::new(TempFdArray::with_max_entries(None)?),
+            spill_full: AtomicBool::new(false),
+            dropped_samples: AtomicU64::new(0),
+        })
+    }
+}
+
+impl<T: Hash + Eq + 'static> ShardedCollector<T> {
+    pub(crate) fn configure_max_spill_entries(
+        &mut self,
+        max_spill_entries: Option<usize>,
+    ) -> std::io::Result<()> {
+        for shard in &mut self.shards {
+            for bucket in shard.get_mut().iter_mut() {
+                bucket.length = 0;
+            }
+        }
+        self.dropped_samples.store(0, Ordering::Relaxed);
+        self.spill_full
+            .store(max_spill_entries == Some(0), Ordering::Relaxed);
+        self.spill.get_mut().set_max_entries(max_spill_entries)
+    }
+
+    pub(crate) fn reset(&mut self) -> std::io::Result<()> {
+        self.configure_max_spill_entries(None)
+    }
+
+    pub(crate) fn dropped_samples(&self) -> u64 {
+        self.dropped_samples.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spilled_entries(&self) -> usize {
+        self.spill.lock().total_entries()
+    }
+
+    pub(crate) fn try_add(&self, key: T, count: isize) -> ConcurrentAddOutcome {
+        let hash_value = HashCounter::<T>::hash(&key);
+        let shard_idx = ((hash_value >> 32) as usize) & (NUM_SHARDS - 1);
+        let bucket_idx = (hash_value as usize) & (BUCKETS_PER_SHARD - 1);
+
+        let mut shard_guard = None;
+        for _ in 0..32 {
+            if let Some(g) = self.shards[shard_idx].try_lock() {
+                shard_guard = Some(g);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        let Some(mut shard) = shard_guard else {
+            return ConcurrentAddOutcome::Contended(count.max(0) as u64);
+        };
+
+        if self.spill_full.load(Ordering::Relaxed) {
+            let dropped = shard[bucket_idx].add_capped(key, count);
+            drop(shard);
+            if dropped > 0 {
+                let d = dropped as u64;
+                self.dropped_samples.fetch_add(d, Ordering::Relaxed);
+                return ConcurrentAddOutcome::DroppedSpill(d);
+            }
+            return ConcurrentAddOutcome::Recorded;
+        }
+
+        let evict = shard[bucket_idx].add(key, count);
+        drop(shard);
+
+        if let Some(evict) = evict {
+            let evict_count = evict.count.max(0) as u64;
+            let mut spill_guard = None;
+            for _ in 0..256 {
+                if let Some(g) = self.spill.try_lock() {
+                    spill_guard = Some(g);
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+            let Some(mut spill) = spill_guard else {
+                return ConcurrentAddOutcome::Contended(evict_count);
+            };
+
+            if spill.is_full() {
+                self.spill_full.store(true, Ordering::Relaxed);
+                self.dropped_samples
+                    .fetch_add(evict_count, Ordering::Relaxed);
+                return ConcurrentAddOutcome::DroppedSpill(evict_count);
+            }
+
+            if spill.push(evict).is_err() {
+                self.dropped_samples
+                    .fetch_add(evict_count, Ordering::Relaxed);
+                return ConcurrentAddOutcome::DroppedSpill(evict_count);
+            }
+            if spill.is_full() {
+                self.spill_full.store(true, Ordering::Relaxed);
+            }
+        }
+
+        ConcurrentAddOutcome::Recorded
+    }
+
+    pub(crate) fn try_for_each<F>(&self, mut f: F) -> std::io::Result<()>
+    where
+        F: FnMut(&Entry<T>),
+    {
+        for shard_mutex in &self.shards {
+            let shard = shard_mutex.lock();
+            for bucket in shard.iter() {
+                for entry in bucket.iter() {
+                    f(entry);
+                }
+            }
+        }
+        let spill = self.spill.lock();
+        let mut iter = spill.try_iter()?;
+        while let Some(entry) = iter.next_ref()? {
+            f(entry);
+        }
+        Ok(())
     }
 }
 
@@ -800,5 +945,50 @@ mod tests {
                 "heavy hitter {hot} should be retained when cold tail overflows spill cap"
             );
         }
+    }
+
+    #[test]
+    fn sharded_collector_concurrent_multithread_conservation() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let collector = Arc::new(ShardedCollector::<u64>::new().unwrap());
+        let missed = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+
+        const THREADS: usize = 8;
+        const SAMPLES_PER_THREAD: u64 = 4_000;
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            let c = Arc::clone(&collector);
+            let m = Arc::clone(&missed);
+            let d = Arc::clone(&dropped);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..SAMPLES_PER_THREAD {
+                    let key = (t as u64) * 10_000 + (i % 2_500);
+                    match c.try_add(key, 1) {
+                        ConcurrentAddOutcome::Recorded => {}
+                        ConcurrentAddOutcome::DroppedSpill(n) => {
+                            d.fetch_add(n, Ordering::Relaxed);
+                        }
+                        ConcurrentAddOutcome::Contended(n) => {
+                            m.fetch_add(n, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut retained: i64 = 0;
+        collector
+            .try_for_each(|entry| retained += entry.count as i64)
+            .unwrap();
+        let total_accounted =
+            retained as u64 + dropped.load(Ordering::Relaxed) + missed.load(Ordering::Relaxed);
+        assert_eq!(total_accounted, THREADS as u64 * SAMPLES_PER_THREAD);
     }
 }

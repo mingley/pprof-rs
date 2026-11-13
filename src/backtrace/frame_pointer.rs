@@ -4,7 +4,7 @@ use std::ptr::null_mut;
 
 use libc::c_void;
 
-use crate::addr_validate::validate;
+use crate::addr_validate::StackPageValidator;
 
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -97,6 +97,7 @@ impl super::Trace for Trace {
         let mut frame_pointer = frame_pointer as *mut FramePointerLayout;
 
         let mut last_frame_pointer: *mut FramePointerLayout = null_mut();
+        let mut page_cache = StackPageValidator::default();
         loop {
             // The stack grow from high address to low address.
             // but we don't have a reasonable assumption for the hightest address
@@ -112,7 +113,10 @@ impl super::Trace for Trace {
                 break;
             }
 
-            if !validate(frame_pointer as *const libc::c_void) {
+            if !page_cache.validate_range(
+                frame_pointer as usize,
+                std::mem::size_of::<FramePointerLayout>(),
+            ) {
                 break;
             }
             last_frame_pointer = frame_pointer;

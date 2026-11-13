@@ -19,7 +19,7 @@ use spin::RwLock;
 use findshlibs::{Segment, SharedLibrary, TargetSharedLibrary};
 
 use crate::backtrace::{Trace, TraceImpl};
-use crate::collector::Collector;
+use crate::collector::{ConcurrentAddOutcome, ShardedCollector};
 use crate::error::{Error, Result};
 use crate::frames::UnresolvedFrames;
 use crate::report::ReportBuilder;
@@ -39,8 +39,8 @@ pub(crate) static MISSED_SAMPLES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static DROPPED_SPILL_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 pub struct Profiler {
-    pub(crate) data: Collector<UnresolvedFrames>,
-    sample_counter: i32,
+    pub(crate) data: ShardedCollector<UnresolvedFrames>,
+    sample_counter: AtomicU64,
 
     old_sigaction: Option<signal::SigAction>,
     running: bool,
@@ -259,6 +259,7 @@ pub struct ProfilerGuard<'a> {
 }
 
 fn trigger_lazy() {
+    crate::addr_validate::init();
     let _ = backtrace::Backtrace::new();
     let _profiler = PROFILER.read();
     TraceImpl::init();
@@ -302,14 +303,45 @@ impl ProfilerGuard<'_> {
 
 impl<'a> Drop for ProfilerGuard<'a> {
     fn drop(&mut self) {
-        drop(self.timer.take());
+        let clock_type = self.timer.take().map(|timer| {
+            let ct = timer.clock_type;
+            drop(timer);
+            ct
+        });
 
-        match self.profiler.write().as_mut() {
-            Err(_) => {}
-            Ok(profiler) => match profiler.stop() {
-                Ok(()) => {}
-                Err(err) => log::error!("error while stopping profiler {}", err),
-            },
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut spins = 0u32;
+        loop {
+            if let Some(mut guard) = self.profiler.try_write() {
+                if let Ok(profiler) = guard.as_mut()
+                    && let Err(err) = profiler.stop()
+                {
+                    log::error!("error while stopping profiler {}", err);
+                }
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                log::error!("timed out waiting for profiler lock during drop; installing SIG_IGN");
+                let sig = match clock_type.unwrap_or(ClockType::Cpu) {
+                    ClockType::Cpu => signal::Signal::SIGPROF,
+                    ClockType::Wall => signal::Signal::SIGALRM,
+                };
+                let ignore = signal::SigAction::new(
+                    signal::SigHandler::SigIgn,
+                    signal::SaFlags::empty(),
+                    signal::SigSet::empty(),
+                );
+                unsafe {
+                    let _ = signal::sigaction(sig, &ignore);
+                }
+                return;
+            }
+            if spins < 64 {
+                std::hint::spin_loop();
+                spins += 1;
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
         }
     }
 }
@@ -421,8 +453,11 @@ extern "C" fn perf_signal_handler(
 ) {
     let _errno = ErrnoProtector::new();
 
-    if let Some(mut guard) = PROFILER.try_write() {
-        if let Ok(profiler) = guard.as_mut() {
+    if let Some(guard) = PROFILER.try_read() {
+        if let Ok(profiler) = guard.as_ref() {
+            if !profiler.running {
+                return;
+            }
             #[cfg(any(
                 target_arch = "x86_64",
                 target_arch = "aarch64",
@@ -525,8 +560,8 @@ extern "C" fn perf_signal_handler(
 impl Profiler {
     fn new() -> Result<Self> {
         Ok(Profiler {
-            data: Collector::new()?,
-            sample_counter: 0,
+            data: ShardedCollector::new()?,
+            sample_counter: AtomicU64::new(0),
             old_sigaction: None,
             running: false,
             clock_type: ClockType::Cpu,
@@ -610,8 +645,8 @@ impl Profiler {
     }
 
     fn init(&mut self) -> Result<()> {
-        self.sample_counter = 0;
-        self.data = Collector::new()?;
+        self.sample_counter.store(0, Ordering::Relaxed);
+        self.data.reset()?;
         self.running = false;
 
         Ok(())
@@ -675,20 +710,23 @@ impl Profiler {
 
     // This function has to be AS-safe
     pub fn sample(
-        &mut self,
+        &self,
         backtrace: SmallVec<[<TraceImpl as Trace>::Frame; MAX_DEPTH]>,
         thread_name: &[u8],
         thread_id: u64,
         sample_timestamp: SystemTime,
     ) {
         let frames = UnresolvedFrames::new(backtrace, thread_name, thread_id, sample_timestamp);
-        self.sample_counter += 1;
+        self.sample_counter.fetch_add(1, Ordering::Relaxed);
 
-        let dropped_before = self.data.dropped_samples();
-        let _ = self.data.add(frames, 1);
-        let dropped_after = self.data.dropped_samples();
-        if dropped_after > dropped_before {
-            DROPPED_SPILL_SAMPLES.fetch_add(dropped_after - dropped_before, Ordering::Relaxed);
+        match self.data.try_add(frames, 1) {
+            ConcurrentAddOutcome::Recorded => {}
+            ConcurrentAddOutcome::DroppedSpill(dropped) => {
+                DROPPED_SPILL_SAMPLES.fetch_add(dropped, Ordering::Relaxed);
+            }
+            ConcurrentAddOutcome::Contended(missed) => {
+                MISSED_SAMPLES.fetch_add(missed.max(1), Ordering::Relaxed);
+            }
         }
     }
 }
@@ -865,8 +903,8 @@ pub mod tests {
     fn test_thread_blocklist_filter() {
         trigger_lazy();
         let profiler = Profiler {
-            data: Collector::new().unwrap(),
-            sample_counter: 0,
+            data: ShardedCollector::new().unwrap(),
+            sample_counter: AtomicU64::new(0),
             old_sigaction: None,
             running: false,
             clock_type: ClockType::Cpu,
